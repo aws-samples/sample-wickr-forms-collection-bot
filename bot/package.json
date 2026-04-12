@@ -1,0 +1,30 @@
+{
+  "name": "sample-wickr-form-collection-bot",
+  "version": "1.0.0",
+  "description": "Wickr IO custom integration",
+  "main": "bot.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "nohup wpm2 start --no-metrics ./wpm.json >>wpm2.output 2>&1 & echo $! > $(cat pidLocation.json)",
+    "stop": "kill $(cat $(cat pidLocation.json))",
+    "restart": "kill $(cat $(cat pidLocation.json)) && nohup wpm2 start --no-metrics ./wpm.json >>wpm2.output 2>&1 & echo $! > $(cat pidLocation.json)",
+    "test": "node --require ./test/setup.js --test test/*.test.js",
+    "test:property": "node --test test/property/*.test.js"
+  },
+  "dependencies": {
+    "wickrio-bot-api": "7.1.6",
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-transcribe": "^3.0.0",
+    "@aws-sdk/client-transcribe-streaming": "^3.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "overrides": {
+    "lodash": "4.18.1"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.0"
+  }
+}

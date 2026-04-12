@@ -1,0 +1,7 @@
+# False positives from example ARNs in documentation and config
+config.example.yaml
+README.md
+ADMIN-GUIDE.md
+docs/DEPLOY-EC2.md
+docs/ARCHITECTURE.md
+bot/scripts/start-bot.sh

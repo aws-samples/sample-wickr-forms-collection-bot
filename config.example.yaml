@@ -1,0 +1,16 @@
+# Configuration for Form Collection Bot CDK deployment
+# Copy to config.yaml and fill in your values.
+
+# AWS account and region
+account: "123456789012"
+region: "us-east-1"
+
+# ARN of the Secrets Manager secret containing bot credentials
+# Format: {"username":"<bot-username>","password":"<bot-password>"}
+credentialsArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:wickr-bot-credentials"
+
+# Optional: existing VPC ID. If omitted, a new VPC is created.
+# vpcId: "vpc-0123456789abcdef0"
+
+# Set to true to enable ECS Exec for debugging
+isDevelopmentEnv: true
