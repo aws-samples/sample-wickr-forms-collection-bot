@@ -13,10 +13,6 @@ package-lock.json
 bot/package-lock.json
 
 # Build artifacts and temp files
-cdk-deploy-output.txt
-cdk-nag-output.txt
-npm-audit-output.txt
-semgrep-output.txt
 build-and-push.sh
 cdk-deploy.sh
 cdk-deploy-policy.json
