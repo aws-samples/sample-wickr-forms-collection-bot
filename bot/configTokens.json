@@ -1,0 +1,61 @@
+{
+  "supportAdministrators": false,
+  "supportVerification": false,
+  "integration": "wickr-form-collection-bot",
+  "tokens": [
+    {
+      "token": "AWS_REGION",
+      "pattern": "",
+      "type": "string",
+      "description": "AWS region for Bedrock, S3, and Transcribe API calls",
+      "message": "Enter the AWS region (e.g., us-east-1, us-gov-west-1)",
+      "required": true,
+      "default": "us-east-1"
+    },
+    {
+      "token": "BEDROCK_MODEL_ID",
+      "pattern": "",
+      "type": "string",
+      "description": "Amazon Bedrock model ID for form detection and extraction",
+      "message": "Enter the Bedrock model ID",
+      "required": true,
+      "default": "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    },
+    {
+      "token": "REPORTS_BUCKET_NAME",
+      "pattern": "",
+      "type": "string",
+      "description": "S3 bucket name for confirmed report storage (leave empty to skip S3 delivery)",
+      "message": "Enter the S3 bucket name for report storage (or press Enter to skip)",
+      "required": false,
+      "default": ""
+    },
+    {
+      "token": "TRANSCRIPTION_S3_BUCKET",
+      "pattern": "",
+      "type": "string",
+      "description": "S3 bucket for Amazon Transcribe staging (required for voice memo support, leave empty to disable)",
+      "message": "Enter the S3 bucket for Transcribe staging (or press Enter to skip)",
+      "required": false,
+      "default": ""
+    },
+    {
+      "token": "TRANSCRIBE_MODE",
+      "pattern": "",
+      "type": "string",
+      "description": "Transcription mode: batch (default) or streaming",
+      "message": "Enter transcription mode (batch or streaming)",
+      "required": false,
+      "default": "batch"
+    },
+    {
+      "token": "LOG_LEVEL",
+      "pattern": "",
+      "type": "string",
+      "description": "Minimum log level: DEBUG, INFO, WARN, or ERROR",
+      "message": "Enter the log level",
+      "required": false,
+      "default": "INFO"
+    }
+  ]
+}
