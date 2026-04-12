@@ -1,6 +1,8 @@
 # Form Collection Bot for AWS Wickr
 
-An AWS Wickr IO bot that collects structured military reports (SALUTE, MEDEVAC, CAS, PERSTAT, Incident Report) from free-form text or voice memos using Amazon Bedrock. Users describe a situation in natural language, the bot classifies the report type, extracts structured fields, and delivers the confirmed report to a Wickr room and Amazon S3.
+An AWS Wickr IO bot that collects structured military reports from free-form text or voice memos using Amazon Bedrock. Users describe a situation in natural language, the bot classifies the report type, extracts structured fields, and delivers the confirmed report to a Wickr room, Amazon S3, and/or a webhook endpoint.
+
+Includes 7 built-in report types: SALUTE, 9-Line MEDEVAC, 9-Line CAS, PERSTAT, Incident Report, Flight Movement, and Ground Movement. New report types can be added by dropping a single JavaScript file into `bot/forms/` -- no code changes required.
 
 ## Features
 
@@ -12,6 +14,8 @@ An AWS Wickr IO bot that collects structured military reports (SALUTE, MEDEVAC, 
 - JSON-defined forms: add new report types without code changes
 
 ## Architecture
+
+![Architecture Diagram](diagrams/image.png)
 
 ```
 User (Wickr Client)
@@ -26,7 +30,7 @@ node bot.js
   |-- form-detector.js -----> Amazon Bedrock (classification)
   |-- extraction-engine.js -> Amazon Bedrock (field extraction)
   |-- transcription-service.js -> Amazon Transcribe (voice memos)
-  |-- delivery-service.js ---> Wickr Room + Amazon S3
+  |-- delivery-service.js ---> Wickr Room + Amazon S3 + Webhook
   |-- form-registry.js -----> JSON form definitions (bot/forms/)
 ```
 
@@ -296,6 +300,159 @@ npx cdk destroy
 ```
 
 This removes all resources created by the stack (VPC, ECS, S3 bucket, IAM roles).
+
+---
+
+## Built-in Report Types
+
+### SALUTE Report (`/salute`)
+
+Enemy observation report used to report hostile activity. Six fields covering Size, Activity, Location, Unit, Time, and Equipment.
+
+**Example input:**
+> Observed 4 dismounted personnel moving north along the ridgeline at grid AB 1234 5678. Unknown unit, small arms and 1 RPG. Time of observation 0630Z.
+
+**Extracted JSON:**
+```json
+{
+  "size": "4 dismounted personnel",
+  "activity": "moving north along the ridgeline",
+  "location": "AB 1234 5678",
+  "unit": "unknown unit",
+  "time": "0630Z",
+  "equipment": "small arms and 1 RPG"
+}
+```
+
+### 9-Line MEDEVAC Request (`/9line`)
+
+Standard medical evacuation request format. Nine fields covering Location, Callsign, Precedence, Equipment, Patient Type, Security, Marking, Nationality, and NBC contamination. Precedence, Equipment, Security, Nationality, and NBC are enum fields with restricted values.
+
+**Example input:**
+> MEDEVAC request: grid AB 1234 5678, callsign DUSTOFF 7-2 on freq 33.45. 2 litter urgent surgical. No enemy troops in area. Pickup marked with green smoke. US military, no NBC.
+
+**Extracted JSON:**
+```json
+{
+  "location": "AB 1234 5678",
+  "callsign": "DUSTOFF 7-2, freq 33.45",
+  "precedence": "URGENT SURGICAL",
+  "equipment": "NONE",
+  "patientType": "2 LITTER",
+  "security": "NO ENEMY TROOPS",
+  "marking": "SMOKE GREEN",
+  "nationality": "US MILITARY",
+  "nbc": "NONE"
+}
+```
+
+### 9-Line CAS Brief (`/cas`)
+
+Close Air Support request used by JTACs. Fifteen fields covering JTAC callsign, control type, IP/BP, heading, distance, target elevation, target description, target location, type mark, friendlies, egress, and optional remarks/TOT/TTT.
+
+**Example input:**
+> CAS request: JTAC is REAPER 11, type 1 control. IP north, heading 180. Target is enemy fighting position at grid AB 1234 5678, elevation 450m. Mark with laser code 1688. Friendlies 300m south. Egress west.
+
+**Extracted JSON:**
+```json
+{
+  "jtac": "REAPER 11",
+  "controlType": "Type 1",
+  "ipBp": "IP north",
+  "heading": "180",
+  "targetDescription": "enemy fighting position",
+  "targetLocation": "AB 1234 5678",
+  "targetElevation": "450m",
+  "typeMark": "Laser 1688",
+  "friendlies": "300m south",
+  "egress": "West"
+}
+```
+
+### PERSTAT Report (`/perstat`)
+
+Personnel Status (RED 1) report for unit accountability. Nine fields covering Company, Platoon, Location, Assigned, Present for Duty, Leave/Pass, TDY, Replacements, and Remarks.
+
+**Example input:**
+> Alpha Company, 1st Platoon at grid 11SNA 4523 6789. 32 assigned, 28 present for duty, 2 on leave, 1 TDY. Need 1 replacement 11B E-4.
+
+**Extracted JSON:**
+```json
+{
+  "company": "Alpha Company",
+  "platoon": "1st Platoon",
+  "location": "11SNA 4523 6789",
+  "assigned": "32",
+  "presentForDuty": "28",
+  "leavePass": "2",
+  "tdy": "1",
+  "replacements": "1x 11B E-4",
+  "remarks": null
+}
+```
+
+### Incident Report (`/incident`)
+
+Workplace or field incident report. Five fields covering Date/Time, Location, Severity (enum: LOW, MEDIUM, HIGH, CRITICAL), Description, and Affected Persons. Severity is a required enum field -- the bot will block delivery if it cannot be determined.
+
+**Example input:**
+> Chemical spill in Building A loading dock at 2pm today. Severity high. 3 employees affected, one with skin irritation.
+
+**Extracted JSON:**
+```json
+{
+  "dateTime": "2pm today",
+  "location": "Building A loading dock",
+  "severity": "HIGH",
+  "description": "Chemical spill",
+  "affectedPersons": "3 employees, one with skin irritation"
+}
+```
+
+### Flight Movement Report (`/flight`)
+
+Air travel and redeployment tracking. Ten fields covering POC, Movement type, DTG, Departure, Destination, Air (flight details), PAX, Unit, Names, and optional Next Flight.
+
+**Example input:**
+> Flight Movement Report: POC SFC Johnson, Redeployment, DTG 172325OCT25, departing MNL to HND, flight JL078 ETA 0440 on 18 Oct, 2 PAX, unit 1163d TFSB, names SFC J & SGT C. Next flight 1745 HND-SEA / JL068 / 1025 arrival.
+
+**Extracted JSON:**
+```json
+{
+  "poc": "SFC Johnson",
+  "movement": "Redeployment",
+  "dtg": "172325OCT25",
+  "departure": "MNL",
+  "destination": "HND",
+  "air": "JL078 ETA 0440 on 18 Oct",
+  "pax": "2",
+  "unit": "1163d TFSB",
+  "names": "SFC J & SGT C",
+  "nextFlight": "1745 HND-SEA / JL068 / 1025 arrival"
+}
+```
+
+### Ground Movement Report (`/ground`)
+
+Vehicle convoy and ground transportation tracking. Nine fields covering POC (with optional phone), Movement type, DTG, Departure, Destination, Vehicle (type and count), PAX, Unit, and optional Notes (personnel manifest).
+
+**Example input:**
+> Ground Movement Report: POC SFC N +86-010-1234-5678, SP, DTG 200825May2025, departing Marriott/Westin to Camp A, VAN x 1, 4 PAX, unit 1MDTF. Manifest: MAJ Brian, SSG Jones, SSG Kim, SGT David.
+
+**Extracted JSON:**
+```json
+{
+  "poc": "SFC N +86-010-1234-5678",
+  "movement": "SP",
+  "dtg": "200825May2025",
+  "departure": "Marriott/Westin",
+  "destination": "Camp A",
+  "vehicle": "VAN x 1",
+  "pax": "4",
+  "unit": "1MDTF",
+  "notes": "MAJ Brian, SSG Jones, SSG Kim, SGT David"
+}
+```
 
 ---
 
