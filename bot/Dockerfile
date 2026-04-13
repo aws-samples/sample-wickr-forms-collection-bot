@@ -9,7 +9,8 @@ ENV NODE_VERSION=${NODE_VERSION}
 ENV PATH="/usr/bin:/usr/local/bin:/usr/local/nvm/versions/node/v${NODE_VERSION}/bin:${PATH}"
 
 # Install AWS CLI via pip (v2 binary segfaults on some Wickr base images)
-RUN (apt-get update && apt-get install -y python3-pip 2>/dev/null || true) \
+# Install gosu for runtime privilege de-escalation (root -> wickriouser for node process)
+RUN (apt-get update && apt-get install -y python3-pip gosu 2>/dev/null || true) \
     && pip3 install --break-system-packages awscli 2>/dev/null \
     || pip3 install awscli \
     && aws --version
@@ -21,7 +22,8 @@ COPY configTokens.json configure.js configure.sh stop.sh upgrade.sh /tmp/bot-src
 COPY data/ /tmp/bot-src/data/
 COPY forms/ /tmp/bot-src/forms/
 COPY services/ /tmp/bot-src/services/
-RUN cd /tmp/bot-src \
+WORKDIR /tmp/bot-src
+RUN sed -i 's/\r$//' *.sh \
     && chmod 755 *.sh \
     && tar -czf /tmp/software.tar.gz \
        --owner=0 --group=0 \
@@ -32,15 +34,19 @@ RUN cd /tmp/bot-src \
 RUN mkdir -p /usr/lib/wickr/integrations/software/wickr-form-collection-bot \
     && mv /tmp/software.tar.gz /usr/lib/wickr/integrations/software/wickr-form-collection-bot/software.tar.gz
 
-# Copy entrypoint
+# Copy entrypoint (convert CRLF to LF for Linux compatibility)
 COPY scripts/start-bot.sh /home/wickriouser/start-bot.sh
-RUN chmod +x /home/wickriouser/start-bot.sh
+RUN sed -i 's/\r$//' /home/wickriouser/start-bot.sh \
+    && chmod +x /home/wickriouser/start-bot.sh
 
 WORKDIR /home/wickriouser
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=3 \
   CMD pgrep -l wickrio_bot || exit 1
 
+# WickrIOSvr requires root to start and manage the wickrio_bot daemon.
+# This is a platform constraint of the Wickr IO container, not our application code.
+# Accepted exception -- documented in threat model (T-012, M-013).
 USER root
 
 ENTRYPOINT ["./start-bot.sh"]

@@ -154,11 +154,15 @@ fi
 # Brief pause to let ZMQ sockets release
 sleep 3
 
-# --- Start node process manually ---
-echo "[start-bot] Starting node bot.js manually..."
+# --- Start node process manually (drop to wickriouser) ---
+# WickrIOSvr runs as root (platform requirement). The node bot application
+# drops to wickriouser via gosu for least-privilege runtime execution.
+# See: https://openillumi.com/en/en-docker-security-entrypoint-privilege-drop/
+echo "[start-bot] Starting node bot.js as wickriouser (privilege drop)..."
 cd "$INTEGRATION_DIR"
 mkdir -p "$LOG_DIR"
-node bot.js 2>&1 | tee -a "$LOG_FILE" &
+chown -R wickriouser:wickriouser "$INTEGRATION_DIR"
+gosu wickriouser node bot.js 2>&1 | tee -a "$LOG_FILE" &
 NODE_PID=$!
 echo "[start-bot] Node process started, PID: ${NODE_PID}"
 sleep 5
@@ -198,10 +202,10 @@ while true; do
   fi
 
   if ! pgrep -f "node bot.js" >/dev/null 2>&1; then
-    echo "[start-bot] Node process died -- restarting..."
+    echo "[start-bot] Node process died -- restarting as wickriouser..."
     cd "$INTEGRATION_DIR"
     mkdir -p "$LOG_DIR"
-    node bot.js 2>&1 | tee -a "$LOG_FILE" &
+    gosu wickriouser node bot.js 2>&1 | tee -a "$LOG_FILE" &
     NODE_PID=$!
     echo "[start-bot] Node process restarted, PID: ${NODE_PID}"
   fi

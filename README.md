@@ -163,7 +163,10 @@ Leave optional fields empty to disable those features.
 
 **Bedrock Model IDs by environment:**
 - Commercial: `us.anthropic.claude-sonnet-4-20250514-v1:0`
-- GovCloud: `us-gov.anthropic.claude-3-5-sonnet-20241022-v2:0`
+- GovCloud (Anthropic): `us-gov.anthropic.claude-3-5-sonnet-20241022-v2:0`
+- GovCloud (Meta Llama): `meta.llama3-70b-instruct-v1:0`
+
+> **Note:** Department of Defense (DoD) GovCloud deployments that restrict Anthropic model usage should set `BEDROCK_MODEL_ID` to a Meta Llama model. The bot automatically detects the provider from the model ID and switches prompt format and response parsing accordingly -- no code changes required.
 
 ### Step 5: Start the bot
 
