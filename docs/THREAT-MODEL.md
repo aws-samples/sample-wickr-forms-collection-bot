@@ -216,32 +216,5 @@ Static analysis scan performed by Probe (semgrep + checkov) on 2026-04-12. Scan 
 
 | # | Rule ID | File | Severity | Finding | Disposition |
 |---|---------|------|----------|---------|-------------|
-| PS-001 | `last-user-is-root` | bot/Dockerfile:44 | ERROR | The last user in the container is 'root'. | Accepted Exception. WickrIOSvr requires root to start and manage the wickrio_bot daemon. This is a platform constraint of the Wickr IO container -- no published AWS Wickr bot sample supports non-root execution. Fargate provides VM-level task isolation. See T-012, M-013. |
+| PS-001 | `last-user-is-root` | bot/Dockerfile:44 | ERROR | The last user in the container is 'root'. | Accepted Exception. WickrIOSvr requires root to start and manage the wickrio_bot daemon. This is a platform constraint of the Wickr IO container -- no published AWS Wickr bot sample supports non-root execution. Fargate provides VM-level task isolation. The node bot.js application process drops to wickriouser at runtime via gosu. See T-012, M-013. |
 | PS-002 | `missing-user` | bot/Dockerfile:41 | ERROR | By not specifying a USER, a program in the container may run as 'root'. | Accepted Exception. Same root cause as PS-001. USER root is explicitly set with a comment documenting the platform constraint. |
-
-### Warning Findings
-
-| # | Rule ID | File(s) | Count | Finding | Disposition |
-|---|---------|---------|-------|---------|-------------|
-| PS-003 | `lazy-load-module` | bot.js, extraction-engine.js, form-detector.js, delivery-service.js, transcription-service.js, form-registry.js, configure.js | 22 | Lazy loading `require()` inside functions instead of at module top level. | Accepted. Intentional design pattern -- AWS SDK clients are lazily initialized so tests can inject mocks via `_setClient()` before the real SDK is loaded. This avoids requiring the AWS SDK at module-load time, which would fail in test environments without `npm install`. |
-| PS-004 | `package-dependencies-check` | package.json, bot/package.json | 9 | Package dependencies with variant versions (caret/tilde ranges) may lead to dependency confusion attacks. | Accepted. `package-lock.json` is committed and pins exact versions. The lock file is used by `npm ci` during CDK deployment and `npm install --unsafe-perm` during Wickr IO console import. |
-| PS-005 | `path-join-resolve-traversal` | bot/services/form-registry.js:22 | 2 | Detected possible user input going into `path.join` or `path.resolve`. | Not Applicable. The `formsDir` parameter in form-registry.js is hardcoded to `path.join(__dirname, '../forms')` at the call site in bot.js. No user input reaches this path. |
-| PS-006 | `detect-non-literal-fs-filename` | bot/services/transcription-service.js, bot/services/form-registry.js | 3 | Non-literal filename argument entering the `fs` module. | Accepted for transcription-service.js: `filePath` comes from WickrIOSvr's file attachment handler, not from user text input. Accepted for form-registry.js: `formsDir` is hardcoded (see PS-005). |
-| PS-007 | `detect-non-literal-require` | bot/services/form-registry.js:22 | 1 | Use of `require(variable)` could allow loading arbitrary code. | Not Applicable. The dynamic `require()` loads form definition files from the `bot/forms/` directory using `fs.readdirSync` filtered to `.js` files. The directory path is hardcoded, not user-controlled. |
-| PS-008 | `html-in-template-string` | bot/services/form-commands.js:69 | 1 | Template literal looks like HTML with interpolated variables (XSS risk). | Not Applicable. Output is sent to Wickr messaging (plain text), not rendered in a browser. Wickr does not interpret HTML in messages. |
-| PS-009 | `avoid-latest-version` | bot/Dockerfile:3 | 1 | Base image uses `:latest` tag instead of pinned version. | Accepted. Documented in threat model (M-005). Deployers should pin the base image digest for production. |
-| PS-010 | `set-pipefail` | bot/Dockerfile:12 | 1 | RUN instruction without `pipefail` set. | Accepted. The RUN command uses `||` fallback chains (not pipes) for compatibility across base image variants. Adding `pipefail` would break the intentional fallback pattern. |
-| PS-011 | `use-workdir` | bot/Dockerfile:24 | 1 | Use `WORKDIR` instead of `RUN cd`. | Accepted. The `RUN cd /tmp/bot-src && ...` is a single-layer build step that creates and immediately removes the temp directory. Using WORKDIR would leave a stale WORKDIR reference after `rm -rf`. |
-| PS-012 | `CKV_DOCKER_7` | bot/Dockerfile:3 | 1 | Base image uses non-pinned version tag. | Duplicate of PS-009. |
-| PS-013 | `CKV_DOCKER_8` | bot/Dockerfile:44 | 1 | Last USER is root. | Duplicate of PS-001. |
-| PS-014 | `CKV_SECRET_6` | bot/configTokens.json:34 | 1 | Base64 high entropy string detected. | Not Applicable. `configTokens.json` contains placeholder token definitions for the Wickr IO console import flow. No actual secrets are stored in this file -- values are populated at runtime by the Wickr IO framework. |
-
-### Info Findings (No Action Required)
-
-| Rule ID | Count | Summary |
-|---------|-------|---------|
-| `missing-template-string-indicator` | 20 | Form definition files use regular strings with `{field}` placeholders in extraction/correction prompts. These are intentionally not template literals -- they are sent to Bedrock as static prompt text, not interpolated by JavaScript. |
-| `unquoted-variable-expansion-in-command` | 6 | Shell variable expansions in start-bot.sh. All variables are set by the script itself (not user input) and `set -euo pipefail` is active. |
-| `dockerfile-source-not-pinned` | 1 | Duplicate of PS-009. |
-| `prefer-json-notation` | 1 | HEALTHCHECK uses shell form for `pgrep` compatibility across base image variants. |
-| `useless-assignment` | 1 | False positive in transcription-service.js -- the `const` is conditionally assigned in different code paths. |
