@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 rm -f .env.configure
 
 if [ -n "$1" ]; then

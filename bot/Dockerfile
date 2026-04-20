@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 # Commercial Wickr IO base image (pinned digest for reproducible builds)
 # For GovCloud, use: public.ecr.aws/x3s2s6k3/wickrio/bot-cloud-govcloud:latest
 FROM public.ecr.aws/x3s2s6k3/wickrio/bot-cloud:latest@sha256:364896e15a917c76f3511252a4b4322d5c4b14dbf6a4dd7100b0cd3c8c3b7d4a

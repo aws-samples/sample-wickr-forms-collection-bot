@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 # bot/scripts/start-bot.sh
 # Entrypoint for Wickr IO bot containers (ECS Fargate or standalone Docker).
 #
