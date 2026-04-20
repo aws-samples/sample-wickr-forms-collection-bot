@@ -36,9 +36,19 @@ node bot.js
 
 ## Prerequisites
 
-- An AWS Wickr network with a bot account (username and password)
-- An AWS account with access to Amazon Bedrock (Claude Sonnet model enabled)
-- The bot account must be a **room moderator** in any room where it receives messages
+Before deploying the bot, complete these setup steps:
+
+| Item | Link |
+|------|------|
+| AWS Wickr network with a bot account (username and password). Adding the bot to your network also covers creating the bot account. | [Setting up AWS Wickr](https://docs.aws.amazon.com/wickr/latest/adminguide/getting-started.html) |
+| Make the bot a **room moderator** in every room where it should receive messages. Without moderator status, Wickr does not deliver room text messages to bots. | [Wickr rooms and moderators](https://docs.aws.amazon.com/wickr/latest/userguide/rooms.html) |
+| AWS account with Amazon Bedrock model access enabled. The bot uses Claude Sonnet by default on commercial and Meta Llama on GovCloud DoD environments. | [Manage Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) |
+| AWS CLI v2 installed and configured with credentials that can manage Wickr, Bedrock, S3, Transcribe, and (for Path B) ECS/CDK resources. | [Install the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| Node.js 20 or later. Required for `npm ci` and `npx cdk` on your build host. The Wickr IO container itself ships Node.js 20 via NVM; you don't install Node inside the container. | [Install Node.js](https://nodejs.org/) |
+| **Path A only:** Docker CE on a supported host (Ubuntu 22.04 or Amazon Linux 2023). Required to run the Wickr IO container on EC2. | [Install Docker Engine](https://docs.docker.com/engine/install/) |
+| **Path B only:** AWS CDK v2, bootstrapped in the target account and region. Required to deploy the ECS Fargate stack. | [Getting started with AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html) |
+
+> **Note:** Building the software tarball on Windows breaks executable permissions on shell scripts inside the tarball, and the Wickr IO import fails with `install shell file is not executable!`. Build the tarball on Linux, macOS, or WSL. See [Step 1](#step-1-build-the-software-tarball) below.
 
 ## Deployment
 
@@ -55,11 +65,12 @@ Two deployment paths are available:
 
 Deploy the bot into an existing Wickr IO container running on an EC2 instance with Docker.
 
-### Prerequisites
+### Path A requirements
 
-- A supported host (Ubuntu 22.04 or Amazon Linux 2023) with Docker CE installed
-- A running Wickr IO container (`public.ecr.aws/x3s2s6k3/wickrio/bot-cloud:latest`)
-- IAM credentials on the host with the following minimum permissions:
+In addition to the top-level [Prerequisites](#prerequisites), Path A needs:
+
+- A running Wickr IO container: `public.ecr.aws/x3s2s6k3/wickrio/bot-cloud:latest` (commercial) or `public.ecr.aws/x3s2s6k3/wickrio/bot-cloud-govcloud:latest` (GovCloud)
+- IAM credentials on the host (instance profile or `~/.aws/credentials`) with at least the following permissions:
 
 ```json
 {
@@ -212,13 +223,13 @@ The bot should classify this as a SALUTE report, extract the fields, and present
 
 Deploy the complete infrastructure using AWS CDK. This creates a VPC, ECS Fargate cluster, S3 reports bucket, IAM roles, and the bot container -- all from a single `cdk deploy`.
 
-### Prerequisites
+### Path B requirements
 
-- [Node.js](https://nodejs.org/) 20 or later
-- [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html) v2
-- Docker (for building the container image)
-- AWS CLI configured with credentials that have permissions to create VPC, ECS, IAM, S3, and CloudFormation resources
-- A Wickr bot account username and password stored in AWS Secrets Manager
+In addition to the top-level [Prerequisites](#prerequisites), Path B needs:
+
+- Docker running locally -- CDK uses it to build the container image before pushing to Amazon ECR
+- AWS credentials with permissions to create VPC, ECS, IAM, S3, ECR, and CloudFormation resources in the target account and region
+- A Wickr bot account username and password stored in AWS Secrets Manager (see [Step 1](#step-1-store-bot-credentials-in-secrets-manager) below)
 
 ### Step 1: Store bot credentials in Secrets Manager
 
