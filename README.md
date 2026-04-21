@@ -514,6 +514,85 @@ form-collection-bot/
   config.example.yaml     Configuration template
 ```
 
+## Production Hardening
+
+This sample is intended as an educational proof of concept. Before deploying to a production environment, review and address the following security considerations.
+
+### Webhook URL validation
+
+The `/<form> set-webhook <url>` command is accessible to any Wickr user who can message the bot. A user could configure a webhook pointing to an attacker-controlled endpoint, causing all confirmed reports for that form type to be POSTed externally.
+
+**Recommended remediation:**
+- Restrict the `set-webhook` and `set-room` commands to authorized administrators only. Implement an admin check in `message-router.js` that verifies the sender against an allowlist (e.g., a DynamoDB table or environment variable) before processing configuration commands.
+- Validate webhook URLs against an allowlist of approved domains or URL prefixes before storing them.
+
+### Rate limiting
+
+The bot does not implement per-user rate limiting. A user could flood the bot with messages or large voice memos to exhaust Amazon Bedrock and Amazon Transcribe API quotas, degrade service for other users, and increase AWS costs.
+
+**Recommended remediation:**
+- Add per-user message rate limits at the application level (e.g., max 10 messages per minute per sender).
+- Set voice memo size limits to prevent large audio files from consuming excessive Transcribe quota.
+- Configure Amazon Bedrock and Transcribe service quotas appropriate for your expected usage.
+
+### Prompt injection
+
+The bot sends user-provided text directly to Amazon Bedrock for classification and field extraction. Adversarial input could manipulate model responses, causing incorrect field values, misclassification, or unintended output.
+
+**Mitigations already in place:**
+- Structured system prompts constrain the model to return only JSON with specific field names.
+- Enum field validation rejects values not in the allowed set.
+- Human-in-the-loop confirmation requires the user to review and approve extracted fields before delivery.
+
+**Additional recommended remediation:**
+- Monitor extraction quality and flag reports where multiple fields are `[Not provided]`.
+- Consider adding input sanitization for known injection patterns.
+
+### Container image integrity
+
+The CDK stack builds the Docker image from source and pushes to Amazon ECR. The base Wickr IO image is pulled from the public ECR gallery.
+
+**Recommended remediation:**
+- Pin the base image by digest (not `:latest` tag) for reproducible builds. The Dockerfile includes a comment showing the digest format.
+- Enable ECR image scanning to detect known vulnerabilities.
+- Restrict ECR push permissions to the CI/CD pipeline role only.
+
+### Credential management
+
+Bot credentials are stored in AWS Secrets Manager and retrieved at container startup. The entrypoint script clears the password from environment variables immediately after writing `clientConfig.json`. However, `clientConfig.json` remains on the container filesystem with the bot password in plaintext for the lifetime of the container.
+
+**Recommended remediation:**
+- Enable Secrets Manager automatic rotation for the bot credentials.
+- Restrict `secretsmanager:GetSecretValue` to the ECS task role only (the CDK stack already scopes this to the specific secret ARN).
+- Consider mounting `clientConfig.json` on a `tmpfs` volume so it is never written to persistent storage.
+- Set `isDevelopmentEnv: false` in `config.yaml` for production deployments. This disables ECS Exec, which would otherwise allow interactive shell access to the running container.
+
+### S3 bucket access
+
+The reports bucket is configured with SSE-S3 encryption, versioning, `BlockPublicAccess`, and `enforceSSL`. Only the ECS task role has object-level permissions.
+
+**Recommended remediation:**
+- Add an explicit S3 bucket policy restricting access to specific IAM principals.
+- Consider using AWS KMS customer-managed keys (CMK) instead of SSE-S3 for additional key management control and audit trail via CloudTrail.
+
+### Log access
+
+The bot uses privacy-preserving logging: message previews (first 80-100 characters) and metadata (correlation IDs, timing, form types) are logged, but full message content and extracted report fields are not.
+
+**Recommended remediation:**
+- Scope CloudWatch Logs read access via IAM policies to authorized operators only.
+- Enable AWS CloudTrail for API-level audit trail of all AWS service calls made by the bot.
+
+### Container runs as root
+
+`WickrIOSvr` requires root to start and manage the `wickrio_bot` daemon. This is a platform constraint of the Wickr IO container architecture — no published AWS Wickr bot sample supports non-root execution.
+
+**Mitigation in place:** The entrypoint script (`scripts/start-bot.sh`) uses `gosu` to drop the Node.js bot application process to the `wickriouser` non-privileged user after `WickrIOSvr` has started. `WickrIOSvr` itself continues running as root. ECS Fargate provides VM-level task isolation between containers.
+
+**Recommended remediation:**
+- Set `isDevelopmentEnv: false` in production to disable ECS Exec.
+- Monitor for upstream Wickr IO container updates that may support non-root execution in the future.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md) for more information.
