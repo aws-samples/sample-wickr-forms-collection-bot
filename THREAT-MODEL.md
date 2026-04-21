@@ -18,7 +18,7 @@ Major components:
 - Amazon Transcribe for voice memo transcription (batch and streaming modes)
 - Amazon S3 for confirmed report storage (JSON) and temporary Transcribe staging
 - AWS Secrets Manager for bot credential storage
-- Amazon VPC with private subnets (no public IP on the container)
+- Amazon VPC with private subnets (no public IP on the container), NAT Gateway for outbound
 - Amazon CloudWatch Logs for structured application logging
 - Amazon ECR for container image storage
 
