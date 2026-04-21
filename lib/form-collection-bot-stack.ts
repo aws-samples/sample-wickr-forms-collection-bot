@@ -4,7 +4,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import { NagSuppressions } from 'cdk-nag';
 import { NewVpc } from './constructs/new-vpc';
 import { ImportedVpc } from './constructs/imported-vpc';
 import { EcsCluster } from './constructs/ecs-cluster';
@@ -38,13 +37,6 @@ export class FormCollectionBotStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-
-    NagSuppressions.addResourceSuppressions(reportsBucket, [
-      {
-        id: 'AwsSolutions-S1',
-        reason: 'Server access logging is a deployment-time decision for this sample',
-      },
-    ]);
 
     // Wickr bot ECS service
     new WickrBot(this as any, 'WickrBot', {

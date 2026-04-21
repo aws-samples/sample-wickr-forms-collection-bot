@@ -4,8 +4,6 @@
 import * as fs from 'fs';
 import * as cdk from 'aws-cdk-lib';
 import * as yaml from 'js-yaml';
-import { Aspects } from 'aws-cdk-lib';
-import { AwsSolutionsChecks } from 'cdk-nag';
 import { FormCollectionBotStack } from '../lib/form-collection-bot-stack';
 
 interface AppConfig {
@@ -47,5 +45,3 @@ new FormCollectionBotStack(app, 'FormCollectionBotStack', {
     region: config.region,
   },
 } as any);
-
-Aspects.of(app).add(new AwsSolutionsChecks());

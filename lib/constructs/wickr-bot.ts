@@ -10,7 +10,6 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
-import { NagSuppressions } from 'cdk-nag';
 
 export interface WickrBotProps {
   readonly vpc: ec2.IVpc;
@@ -142,40 +141,5 @@ export class WickrBot extends Construct {
       enableExecuteCommand: props.isDevelopmentEnv,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
     });
-
-    // --- cdk-nag suppressions ---
-
-    const taskRoleSuppressions = [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'Transcribe actions do not support resource-level permissions',
-      },
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'Foundation model ARN uses wildcard for model version flexibility',
-      },
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'S3 object actions require wildcard suffix on bucket ARN',
-      },
-    ];
-    if (props.isDevelopmentEnv) {
-      taskRoleSuppressions.push({
-        id: 'AwsSolutions-IAM5',
-        reason: 'ECS Exec requires ssmmessages on Resource: *',
-      });
-    }
-    NagSuppressions.addResourceSuppressions(taskRole, taskRoleSuppressions, true);
-
-    NagSuppressions.addResourceSuppressions(taskDefinition, [
-      {
-        id: 'AwsSolutions-ECS2',
-        reason: 'Environment variables are non-sensitive configuration (ARNs, region, bucket name)',
-      },
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'ECR GetAuthorizationToken requires Resource: * (CDK-managed execution role)',
-      },
-    ], true);
   }
 }

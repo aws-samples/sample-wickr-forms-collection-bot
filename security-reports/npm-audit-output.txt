@@ -1,5 +1,0 @@
-﻿=== npm audit: CDK package (form-collection-bot-deliverable-apg/) ===
-found 0 vulnerabilities
-
-=== npm audit: Bot package (form-collection-bot-deliverable-apg/bot/) ===
-found 0 vulnerabilities
