@@ -594,7 +594,7 @@ The bot container requires outbound internet connectivity for:
 | TCP | 443 | Webhook endpoint (if configured) | Report delivery to external HTTPS URL |
 | UDP | 16384-16584 | Wickr cloud service | Wickr real-time media protocol |
 
-The CDK stack (Path B) deploys the container in a **private subnet with no public IP**. Outbound traffic routes through a NAT gateway created by the stack (`natGateways: 1` in the VPC construct). This is the recommended production configuration — the bot has no need for inbound connectivity from the internet.
+The CDK stack (Path B) deploys the container in a **private subnet with no public IP**. Outbound traffic routes through a NAT gateway created by the stack (`natGateways: 1` in the VPC construct). 
 
 **If deploying manually (Path A or custom ECS):**
 - Place the container in a private subnet with a route to a NAT gateway, OR
