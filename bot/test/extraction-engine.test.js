@@ -3,7 +3,7 @@
 
 'use strict';
 
-// ── Bootstrap: mock @aws-sdk/client-bedrock-runtime before any service loads ──
+// -- Bootstrap: mock @aws-sdk/client-bedrock-runtime before any service loads --
 // This must appear before require('./setup') and before any require of
 // extraction-engine.js so that Node's module system never tries to resolve
 // the real AWS SDK package (which may not be installed in the test environment).
@@ -27,7 +27,7 @@ require.cache[BEDROCK_STUB_KEY] = {
     BedrockRuntimeClient: class BedrockRuntimeClient {
       constructor() {}
       async send() {
-        throw new Error('Use extraction-engine._setClient() to inject a mock before calling extract()');
+        throw new Error('Use extraction-engine._setClient() to inject a mock before calling extractForm()');
       }
     },
     InvokeModelCommand: class InvokeModelCommand {
@@ -39,11 +39,11 @@ require.cache[BEDROCK_STUB_KEY] = {
   paths: [],
 };
 
-// ── Setup: load Wickr IO mocks ─────────────────────────────────────────────────
+// -- Setup: load Wickr IO mocks ------------------------------------------------
 require('./setup');
 
-// ── Imports ───────────────────────────────────────────────────────────────────
-const { describe, it, beforeEach } = require('node:test');
+// -- Imports -------------------------------------------------------------------
+const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { mock } = require('node:test');
 
@@ -51,7 +51,7 @@ const extractionEngine = require('../services/extraction-engine');
 
 const NOT_PROVIDED = '[Not provided]';
 
-// ── Test helpers ──────────────────────────────────────────────────────────────
+// -- Test helpers --------------------------------------------------------------
 
 /**
  * Wraps fields as a Bedrock response body (Buffer containing Claude JSON).
@@ -79,259 +79,7 @@ function makeMockClient(responseOrError) {
   };
 }
 
-// ── Unit Tests ────────────────────────────────────────────────────────────────
-
-describe('extraction-engine', () => {
-  beforeEach(() => {
-    // Each test injects its own mock client via extractionEngine._setClient()
-  });
-
-  // ── Happy path ───────────────────────────────────────────────────────────
-
-  it('returns a complete Nine_Line_Request when Bedrock returns all nine fields', async () => {
-    const fields = {
-      location: 'AB 1234 5678',
-      callsign: 'DUSTOFF 7-2, freq 33.45',
-      precedence: 'URGENT',
-      equipment: 'NONE',
-      patientType: '2 LITTER, 1 AMBULATORY',
-      security: 'POSSIBLE ENEMY',
-      marking: 'SMOKE GREEN',
-      nationality: 'US MILITARY',
-      nbc: 'NONE',
-    };
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse(fields)));
-
-    const result = await extractionEngine.extract('Soldier down at AB 1234 5678, urgent evac needed');
-
-    assert.equal(result.location,    'AB 1234 5678');
-    assert.equal(result.callsign,    'DUSTOFF 7-2, freq 33.45');
-    assert.equal(result.precedence,  'URGENT');
-    assert.equal(result.equipment,   'NONE');
-    assert.equal(result.patientType, '2 LITTER, 1 AMBULATORY');
-    assert.equal(result.security,    'POSSIBLE ENEMY');
-    assert.equal(result.marking,     'SMOKE GREEN');
-    assert.equal(result.nationality, 'US MILITARY');
-    assert.equal(result.nbc,         'NONE');
-    assert.equal(result.error,       undefined, 'should have no error property');
-  });
-
-  // ── Partial information ───────────────────────────────────────────────────
-
-  it('populates known fields and marks missing fields as [Not provided]', async () => {
-    const fields = {
-      location:    'Grid 38SMB',
-      callsign:    null,
-      precedence:  'PRIORITY',
-      equipment:   null,
-      patientType: '1 AMBULATORY',
-      security:    null,
-      marking:     null,
-      nationality: null,
-      nbc:         null,
-    };
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse(fields)));
-
-    const result = await extractionEngine.extract('One walking wounded at Grid 38SMB, priority');
-
-    assert.equal(result.location,    'Grid 38SMB');
-    assert.equal(result.callsign,    NOT_PROVIDED);
-    assert.equal(result.precedence,  'PRIORITY');
-    assert.equal(result.equipment,   NOT_PROVIDED);
-    assert.equal(result.patientType, '1 AMBULATORY');
-    assert.equal(result.security,    NOT_PROVIDED);
-    assert.equal(result.marking,     NOT_PROVIDED);
-    assert.equal(result.nationality, NOT_PROVIDED);
-    assert.equal(result.nbc,         NOT_PROVIDED);
-  });
-
-  // ── No medically relevant information ────────────────────────────────────
-
-  it('returns all nine fields as [Not provided] when no relevant information is present', async () => {
-    const fields = {
-      location: null, callsign: null, precedence: null, equipment: null,
-      patientType: null, security: null, marking: null, nationality: null, nbc: null,
-    };
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse(fields)));
-
-    const result = await extractionEngine.extract('Hello there, how are you?');
-
-    assert.equal(result.location,    NOT_PROVIDED);
-    assert.equal(result.callsign,    NOT_PROVIDED);
-    assert.equal(result.precedence,  NOT_PROVIDED);
-    assert.equal(result.equipment,   NOT_PROVIDED);
-    assert.equal(result.patientType, NOT_PROVIDED);
-    assert.equal(result.security,    NOT_PROVIDED);
-    assert.equal(result.marking,     NOT_PROVIDED);
-    assert.equal(result.nationality, NOT_PROVIDED);
-    assert.equal(result.nbc,         NOT_PROVIDED);
-  });
-
-  // ── Bedrock failure ───────────────────────────────────────────────────────
-
-  it('returns a user-friendly error object when Bedrock throws, does not rethrow', async () => {
-    extractionEngine._setClient(makeMockClient(new Error('Service unavailable')));
-
-    const result = await extractionEngine.extract('some text');
-
-    assert.ok(result.error, 'should have an error property');
-    assert.equal(typeof result.error, 'string');
-    assert.ok(result.error.length > 0, 'error message should not be empty');
-    // Nine-line fields must NOT be present on error response
-    assert.equal(result.location,   undefined);
-    assert.equal(result.precedence, undefined);
-  });
-
-  // ── Enum validation: only standard values accepted ────────────────────────
-
-  it('rejects invalid precedence and marks it as [Not provided]', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: 'AB 0000', callsign: null,
-      precedence: 'SUPER URGENT', // invalid
-      equipment: null, patientType: null, security: null,
-      marking: null, nationality: null, nbc: null,
-    })));
-    const result = await extractionEngine.extract('test');
-    assert.equal(result.precedence, NOT_PROVIDED);
-  });
-
-  it('rejects invalid equipment and marks it as [Not provided]', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: null, callsign: null, precedence: 'ROUTINE',
-      equipment: 'HELICOPTER', // invalid
-      patientType: null, security: null, marking: null, nationality: null, nbc: null,
-    })));
-    const result = await extractionEngine.extract('test');
-    assert.equal(result.equipment, NOT_PROVIDED);
-  });
-
-  it('rejects invalid security and marks it as [Not provided]', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: null, callsign: null, precedence: null, equipment: null,
-      patientType: null,
-      security: 'UNKNOWN THREAT', // invalid
-      marking: null, nationality: null, nbc: null,
-    })));
-    const result = await extractionEngine.extract('test');
-    assert.equal(result.security, NOT_PROVIDED);
-  });
-
-  it('rejects invalid nationality and marks it as [Not provided]', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: null, callsign: null, precedence: null, equipment: null,
-      patientType: null, security: null, marking: null,
-      nationality: 'ALIEN', // invalid
-      nbc: null,
-    })));
-    const result = await extractionEngine.extract('test');
-    assert.equal(result.nationality, NOT_PROVIDED);
-  });
-
-  it('rejects invalid nbc and marks it as [Not provided]', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: null, callsign: null, precedence: null, equipment: null,
-      patientType: null, security: null, marking: null, nationality: null,
-      nbc: 'RADIOLOGICAL', // invalid
-    })));
-    const result = await extractionEngine.extract('test');
-    assert.equal(result.nbc, NOT_PROVIDED);
-  });
-
-  // ── All valid enum values are accepted ────────────────────────────────────
-
-  it('accepts all valid precedence values', async () => {
-    for (const val of ['URGENT', 'URGENT SURGICAL', 'PRIORITY', 'ROUTINE', 'CONVENIENCE']) {
-      extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-        location: null, callsign: null, precedence: val, equipment: null,
-        patientType: null, security: null, marking: null, nationality: null, nbc: null,
-      })));
-      const result = await extractionEngine.extract('test');
-      assert.equal(result.precedence, val, `Expected '${val}' to be accepted`);
-    }
-  });
-
-  it('accepts all valid equipment values', async () => {
-    for (const val of ['NONE', 'HOIST', 'EXTRACTION EQUIPMENT', 'VENTILATOR']) {
-      extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-        location: null, callsign: null, precedence: null, equipment: val,
-        patientType: null, security: null, marking: null, nationality: null, nbc: null,
-      })));
-      const result = await extractionEngine.extract('test');
-      assert.equal(result.equipment, val, `Expected '${val}' to be accepted`);
-    }
-  });
-
-  it('accepts all valid security values', async () => {
-    for (const val of ['NO ENEMY TROOPS', 'POSSIBLE ENEMY', 'ENEMY IN AREA', 'ARMED ESCORT REQUIRED']) {
-      extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-        location: null, callsign: null, precedence: null, equipment: null,
-        patientType: null, security: val, marking: null, nationality: null, nbc: null,
-      })));
-      const result = await extractionEngine.extract('test');
-      assert.equal(result.security, val, `Expected '${val}' to be accepted`);
-    }
-  });
-
-  it('accepts all valid nationality values', async () => {
-    for (const val of ['US MILITARY', 'US CIVILIAN', 'NON-US MILITARY', 'NON-US CIVILIAN', 'EPW']) {
-      extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-        location: null, callsign: null, precedence: null, equipment: null,
-        patientType: null, security: null, marking: null, nationality: val, nbc: null,
-      })));
-      const result = await extractionEngine.extract('test');
-      assert.equal(result.nationality, val, `Expected '${val}' to be accepted`);
-    }
-  });
-
-  it('accepts all valid nbc values', async () => {
-    for (const val of ['NUCLEAR', 'BIOLOGICAL', 'CHEMICAL', 'NONE']) {
-      extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-        location: null, callsign: null, precedence: null, equipment: null,
-        patientType: null, security: null, marking: null, nationality: null, nbc: val,
-      })));
-      const result = await extractionEngine.extract('test');
-      assert.equal(result.nbc, val, `Expected '${val}' to be accepted`);
-    }
-  });
-
-  // ── Result structure ──────────────────────────────────────────────────────
-
-  it('result always contains exactly the nine required fields', async () => {
-    extractionEngine._setClient(makeMockClient(makeBedrockResponse({
-      location: 'XY 9999', callsign: 'MEDEVAC-1', precedence: 'URGENT',
-      equipment: 'HOIST', patientType: '3 LITTER', security: 'ENEMY IN AREA',
-      marking: 'PANEL', nationality: 'US CIVILIAN', nbc: 'NONE',
-    })));
-
-    const result = await extractionEngine.extract('test');
-    const expected = ['location', 'callsign', 'precedence', 'equipment', 'patientType', 'security', 'marking', 'nationality', 'nbc'];
-    for (const k of expected) {
-      assert.ok(Object.prototype.hasOwnProperty.call(result, k), `Missing field: ${k}`);
-    }
-    assert.equal(Object.keys(result).length, expected.length);
-  });
-
-  // ── Malformed JSON from Claude ────────────────────────────────────────────
-
-  it('returns all [Not provided] when Claude returns non-JSON content', async () => {
-    const badResponse = {
-      body: Buffer.from(
-        JSON.stringify({ content: [{ text: 'Sorry, I cannot help with that.' }] })
-      ),
-    };
-    extractionEngine._setClient(makeMockClient(badResponse));
-
-    const result = await extractionEngine.extract('some text');
-    assert.equal(result.location,   NOT_PROVIDED);
-    assert.equal(result.precedence, NOT_PROVIDED);
-    assert.equal(result.nbc,        NOT_PROVIDED);
-    // Should still have all nine fields
-    assert.equal(Object.keys(result).length, 9);
-  });
-});
-
-
-// ── Tests for extractForm and extractCorrection (Task 7) ──────────────────────
+// -- Form-generic test fixture -------------------------------------------------
 
 const MOCK_FORM_DEF = {
   id: 'TEST_FORM',
@@ -348,6 +96,8 @@ const MOCK_FORM_DEF = {
   formatFooter: '=============',
   outputs: [],
 };
+
+// -- extractForm ---------------------------------------------------------------
 
 describe('extractForm', () => {
   it('returns a normalized report when Bedrock returns valid JSON', async () => {
@@ -396,6 +146,8 @@ describe('extractForm', () => {
     assert.ok(result.error.length > 0);
   });
 });
+
+// -- extractCorrection ---------------------------------------------------------
 
 describe('extractCorrection', () => {
   it('returns partial object with one corrected field', async () => {

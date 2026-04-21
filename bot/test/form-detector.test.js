@@ -3,7 +3,7 @@
 
 'use strict';
 
-// ── Bootstrap: stub AWS SDK modules before any service loads ──────────────────
+// -- Bootstrap: stub AWS SDK modules before any service loads ------------------
 const Module = require('module');
 
 const AWS_BEDROCK_KEY = '__aws_bedrock_runtime_stub_detector__';
@@ -23,17 +23,17 @@ require.cache[AWS_BEDROCK_KEY] = {
   parent: null, children: [], paths: [],
 };
 
-// ── Load module under test ────────────────────────────────────────────────────
+// -- Load module under test ----------------------------------------------------
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const formDetector = require('../services/form-detector');
 
-// ── Test helpers ──────────────────────────────────────────────────────────────
+// -- Test helpers --------------------------------------------------------------
 
 const MOCK_FORM_DEFS = [
-  { id: 'MEDEVAC', detectionHint: 'A 9-Line MEDEVAC request for medical evacuation. Keywords: medevac, casualty.' },
-  { id: 'SALUTE', detectionHint: 'A SALUTE report for enemy observation. Keywords: salute, enemy.' },
-  { id: 'CAS', detectionHint: 'A 9-Line Close Air Support brief. Keywords: CAS, airstrike.' },
+  { id: 'INCIDENT', detectionHint: 'A workplace incident report. Keywords: incident, spill, injury, accident.' },
+  { id: 'SHIFT_HANDOFF', detectionHint: 'A shift handoff report for patient status. Keywords: handoff, shift change, vitals.' },
+  { id: 'DELIVERY_LOG', detectionHint: 'A delivery log entry. Keywords: delivery, shipment, package, received.' },
 ];
 
 /**
@@ -60,16 +60,16 @@ function makeErrorClient(message) {
   };
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------------------
 
 describe('form-detector', () => {
 
   describe('buildDetectionPrompt', () => {
     it('includes all form IDs in the prompt', () => {
       const prompt = formDetector.buildDetectionPrompt(MOCK_FORM_DEFS);
-      assert.ok(prompt.includes('MEDEVAC'), 'prompt should include MEDEVAC');
-      assert.ok(prompt.includes('SALUTE'), 'prompt should include SALUTE');
-      assert.ok(prompt.includes('CAS'), 'prompt should include CAS');
+      assert.ok(prompt.includes('INCIDENT'), 'prompt should include INCIDENT');
+      assert.ok(prompt.includes('SHIFT_HANDOFF'), 'prompt should include SHIFT_HANDOFF');
+      assert.ok(prompt.includes('DELIVERY_LOG'), 'prompt should include DELIVERY_LOG');
     });
 
     it('includes all detectionHints in the prompt', () => {
@@ -86,22 +86,22 @@ describe('form-detector', () => {
       formDetector._setClient(null);
     });
 
-    it('returns MEDEVAC when Bedrock responds with MEDEVAC', async () => {
-      formDetector._setClient(makeMockClient('MEDEVAC'));
-      const result = await formDetector.detect('2 wounded need evac', MOCK_FORM_DEFS);
-      assert.equal(result, 'MEDEVAC');
+    it('returns INCIDENT when Bedrock responds with INCIDENT', async () => {
+      formDetector._setClient(makeMockClient('INCIDENT'));
+      const result = await formDetector.detect('chemical spill in loading dock', MOCK_FORM_DEFS);
+      assert.equal(result, 'INCIDENT');
     });
 
-    it('returns SALUTE when Bedrock responds with SALUTE', async () => {
-      formDetector._setClient(makeMockClient('SALUTE'));
-      const result = await formDetector.detect('enemy troops observed', MOCK_FORM_DEFS);
-      assert.equal(result, 'SALUTE');
+    it('returns SHIFT_HANDOFF when Bedrock responds with SHIFT_HANDOFF', async () => {
+      formDetector._setClient(makeMockClient('SHIFT_HANDOFF'));
+      const result = await formDetector.detect('handoff for Bed 12A', MOCK_FORM_DEFS);
+      assert.equal(result, 'SHIFT_HANDOFF');
     });
 
-    it('returns CAS when Bedrock responds with CAS', async () => {
-      formDetector._setClient(makeMockClient('CAS'));
-      const result = await formDetector.detect('request close air support', MOCK_FORM_DEFS);
-      assert.equal(result, 'CAS');
+    it('returns DELIVERY_LOG when Bedrock responds with DELIVERY_LOG', async () => {
+      formDetector._setClient(makeMockClient('DELIVERY_LOG'));
+      const result = await formDetector.detect('FedEx package received at dock', MOCK_FORM_DEFS);
+      assert.equal(result, 'DELIVERY_LOG');
     });
 
     it('returns UNKNOWN when Bedrock responds with UNKNOWN', async () => {
@@ -111,9 +111,9 @@ describe('form-detector', () => {
     });
 
     it('trims whitespace from Bedrock response', async () => {
-      formDetector._setClient(makeMockClient('  MEDEVAC  \n'));
-      const result = await formDetector.detect('wounded soldiers', MOCK_FORM_DEFS);
-      assert.equal(result, 'MEDEVAC');
+      formDetector._setClient(makeMockClient('  INCIDENT  \n'));
+      const result = await formDetector.detect('accident in building A', MOCK_FORM_DEFS);
+      assert.equal(result, 'INCIDENT');
     });
 
     it('returns UNKNOWN when Bedrock returns unrecognized text', async () => {
