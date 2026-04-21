@@ -17,22 +17,6 @@ The bot ships with two example report types: an **Incident Report** and a **Shif
 
 ![Architecture Diagram](diagrams/image.png)
 
-```
-User (Wickr Client)
-  |
-  | Wickr end-to-end encrypted
-  v
-WickrIOSvr (wickrio_bot daemon)
-  |
-  | ZeroMQ IPC
-  v
-node bot.js
-  |-- form-detector.js -----> Amazon Bedrock (classification)
-  |-- extraction-engine.js -> Amazon Bedrock (field extraction)
-  |-- transcription-service.js -> Amazon Transcribe (voice memos)
-  |-- delivery-service.js ---> Wickr Room + Amazon S3 + Webhook
-  |-- form-registry.js -----> Form definitions (bot/forms/)
-```
 
 ## Prerequisites
 
