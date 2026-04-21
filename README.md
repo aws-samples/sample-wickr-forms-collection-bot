@@ -593,6 +593,31 @@ The bot uses privacy-preserving logging: message previews (first 80-100 characte
 - Set `isDevelopmentEnv: false` in production to disable ECS Exec.
 - Monitor for upstream Wickr IO container updates that may support non-root execution in the future.
 
+### Network requirements
+
+The bot container requires outbound internet connectivity for:
+
+| Protocol | Port(s) | Destination | Purpose |
+|----------|---------|-------------|---------|
+| TCP | 443 | Wickr cloud service | Wickr messaging (WickrIOSvr initiates the connection) |
+| TCP | 443 | Amazon Bedrock endpoint | Report classification and field extraction |
+| TCP | 443 | Amazon S3 endpoint | Report storage and Transcribe audio staging |
+| TCP | 443 | Amazon Transcribe endpoint | Voice memo transcription |
+| TCP | 443 | AWS Secrets Manager endpoint | Bot credential retrieval at startup |
+| TCP | 443 | Amazon ECR | Container image pull at task launch |
+| TCP | 443 | Amazon CloudWatch Logs | Application log delivery |
+| TCP | 443 | npm registry (registry.npmjs.org) | Dependency installation during Wickr IO import (EC2 path only) |
+| TCP | 443 | Webhook endpoint (if configured) | Report delivery to external HTTPS URL |
+| UDP | 16384-16584 | Wickr cloud service | Wickr real-time media protocol |
+
+The CDK stack (Path B) deploys the container in a **private subnet with no public IP**. Outbound traffic routes through a NAT gateway created by the stack (`natGateways: 1` in the VPC construct). This is the recommended production configuration — the bot has no need for inbound connectivity from the internet.
+
+**If deploying manually (Path A or custom ECS):**
+- Place the container in a private subnet with a route to a NAT gateway, OR
+- Place it in a public subnet with a public IP (simpler but less secure — expands the attack surface unnecessarily)
+- Ensure the security group allows **egress-only** on TCP 443 and UDP 16384-16584. No inbound rules are needed.
+- Without outbound connectivity, WickrIOSvr cannot reach the Wickr cloud service and the bot will not start.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md) for more information.
