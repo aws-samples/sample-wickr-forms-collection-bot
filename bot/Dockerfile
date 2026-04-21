@@ -49,6 +49,7 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=3 \
 
 # WickrIOSvr requires root to start and manage the wickrio_bot daemon.
 # This is a platform constraint of the Wickr IO container, not our application code.
+# Privilege drops to wickriouser via gosu in start-bot.sh.
 USER root
 
 ENTRYPOINT ["./start-bot.sh"]
