@@ -32,7 +32,7 @@ Infrastructure is deployed via AWS CDK v2. The CDK stack creates the VPC, ECS cl
 |----|-----------|----------|
 | A-01 | The sample asset will be deployed into a non-production environment for educational and proof-of-concept purposes only. | Deployers accept residual risk of sample-grade security controls. |
 | A-02 | Amazon Bedrock model invocations are not logged or stored by AWS beyond standard CloudTrail API call logging. Input/output data is not used for model training. | Per Amazon Bedrock data privacy policy. Sensitive report content sent for classification/extraction is not persisted by the service. |
-| A-03 | The deployer is responsible for enabling VPC Flow Logs and S3 access logging based on their organization's requirements. | cdk-nag suppressions document these as deployment-time decisions. |
+| A-03 | The deployer is responsible for enabling VPC Flow Logs and S3 access logging based on their organization's requirements. | These are deployment-time decisions that vary by customer environment and compliance requirements. |
 | A-04 | All AWS API calls (Bedrock, S3, Transcribe, Secrets Manager) use TLS 1.2+ via AWS SDK v3 default configuration. | No additional TLS configuration required in bot code. |
 | A-05 | Bot credentials are stored in AWS Secrets Manager with access scoped to the ECS task role via IAM policy. | Credential rotation supported via Secrets Manager. CDK grants secretsmanager:GetSecretValue scoped to the specific credentials ARN. |
 | A-06 | The ECS Fargate task role provides least-privilege IAM permissions via temporary credentials from the container credential provider. | No long-term credentials used. Blast radius limited to granted permissions. |
@@ -52,49 +52,7 @@ Infrastructure is deployed via AWS CDK v2. The CDK stack creates the VPC, ECS cl
 
 ### Architecture Diagram
 
-```
-                                    +-----------------------+
-                                    |   AWS Wickr Network   |
-                                    |  (E2E Encrypted Msgs) |
-                                    +----------+------------+
-                                               |
-                                               | Wickr Protocol (E2E encrypted)
-                                               |
-+----------------------------------------------+-----------------------------------------------+
-|  Amazon VPC (Private Subnets, No Public IP)                                                  |
-|                                                                                              |
-|  +-----------------------------------------------------------------------------------------+ |
-|  |  ECS Fargate Task (1024 CPU / 2048 MiB)                                                 | |
-|  |  Security Group: Egress-only TCP 443, UDP 16384-16584                                   | |
-|  |                                                                                         | |
-|  |  +---------------------+     ZeroMQ IPC     +----------------------------------------+ | |
-|  |  |   WickrIOSvr        |<------------------->|  Node.js Bot Application (bot.js)      | | |
-|  |  |   (wickrio_bot)      |                    |                                        | | |
-|  |  +---------------------+                    |  +-- form-detector.js ----+             | | |
-|  |                                              |  |                       |             | | |
-|  |                                              |  +-- extraction-engine --+---> [1] Amazon Bedrock
-|  |                                              |  |                       |     (Claude Sonnet)
-|  |                                              |  +-- transcription-svc --+---> [2] Amazon Transcribe
-|  |                                              |  |                       |
-|  |                                              |  +-- delivery-service ---+---> [3] Amazon S3
-|  |                                              |  |                       |     (Reports Bucket)
-|  |                                              |  +-- form-registry ------+
-|  |                                              |  |                       |---> [4] Wickr Room
-|  |                                              |  +-- message-router -----+     (Broadcast)
-|  |                                              |                          |
-|  |                                              |                          +---> [5] Webhook
-|  |                                              +----------------------------------------+ | |
-|  +-----------------------------------------------------------------------------------------+ |
-|                                                                                              |
-+----------------------------------------------------------------------------------------------+
-         |                    |                    |
-         | [A] HTTPS          | [B] HTTPS          | [C] HTTPS
-         v                    v                    v
-+----------------+  +------------------+  +-------------------+
-| AWS Secrets    |  | Amazon CloudWatch|  | Amazon ECR        |
-| Manager        |  | Logs             |  | (Container Image) |
-+----------------+  +------------------+  +-------------------+
-```
+![Architecture Diagram](diagrams/architecture-diagram.png)
 
 **Data Flow:**
 
@@ -196,7 +154,7 @@ This solution does not expose any public or private REST/HTTP APIs. All interact
 | M-005 | Docker image built from CDK DockerImageAsset (deterministic build from source). Base image pinned to `public.ecr.aws/x3s2s6k3/wickrio/bot-cloud:latest`. Node.js version pinned via Dockerfile ARG (`NODE_VERSION=20.20.1`). | T-010 | Implemented | Deployers should pin base image digest (not `:latest` tag) and enable ECR image scanning for production. |
 | M-006 | S3 report objects include sender identity, timestamp, correlation ID, and form type in the JSON payload. CloudWatch logs include correlation IDs linking message receipt to extraction to delivery. | T-013 | Implemented | Provides audit trail for report attribution. Deployers should enable CloudTrail for API-level auditing. |
 | M-007 | Transcribe batch pipeline deletes temporary audio files from S3 after transcription completes (`deleteS3Object` call in `batchPipeline`). Streaming mode does not stage files in S3 at all. | T-008 | Implemented | Window of exposure is the transcription duration. Deployers can use streaming mode exclusively to eliminate S3 staging. |
-| M-008 | ECS task role follows least-privilege: Bedrock `InvokeModel` scoped to `foundation-model/*` and `inference-profile/*` ARNs, Secrets Manager `GetSecretValue` scoped to specific credentials ARN, S3 `PutObject/GetObject/DeleteObject` scoped to reports bucket, Transcribe actions on `Resource: *` (service limitation). | T-007, T-009 | Implemented | Transcribe does not support resource-level permissions. cdk-nag suppression documents this. |
+| M-008 | ECS task role follows least-privilege: Bedrock `InvokeModel` scoped to `foundation-model/*` and `inference-profile/*` ARNs, Secrets Manager `GetSecretValue` scoped to specific credentials ARN, S3 `PutObject/GetObject/DeleteObject` scoped to reports bucket, Transcribe actions on `Resource: *` (service limitation). | T-007, T-009 | Implemented | Transcribe does not support resource-level permissions. This is a known AWS service limitation documented in the Transcribe IAM reference. |
 | M-009 | Deployers should restrict webhook URL configuration to admin users only and validate webhook URLs against an allowlist of approved endpoints. | T-003 | Recommended | Not implemented in sample. The `/<form> set-webhook` command is accessible to any Wickr user who can message the bot. Production deployments should add authorization checks. |
 | M-010 | Privacy-preserving logging: bot logs message previews (first 80-100 chars) and metadata (correlation IDs, timing, form types) but does not log full message content or extracted report fields. CloudWatch log group has 1-month retention. | T-006 | Implemented | Deployers should scope CloudWatch Logs read access via IAM policies. |
 | M-011 | Wickr E2E encryption (256-bit AES, ECDH key exchange) protects all messages between users and the bot in transit. Identity is managed by the Wickr network -- users authenticate to Wickr, and the bot trusts the sender identity provided by WickrIOSvr. | T-002 | Implemented | Platform-level control. Spoofing requires compromising the Wickr account itself. |
