@@ -477,7 +477,7 @@ Each confirmed report is delivered to all configured output channels:
 | Channel | Configuration | Description |
 |---------|--------------|-------------|
 | Wickr Room | `/<form> set-room` (run from the target room) | Broadcasts the formatted report to a Wickr room |
-| Amazon S3 | `REPORTS_BUCKET_NAME` environment variable | Stores the report as a JSON file in S3 |
+| Amazon S3 | `REPORTS_BUCKET` environment variable | Stores the report as a JSON file in S3 |
 | Webhook | `/<form> set-webhook <url>` | POSTs the report as JSON to an HTTPS endpoint |
 
 All three channels are configured per form type. Channels without configuration are skipped (with a failure note in the delivery response). S3 is configured via environment variable; Wickr room and webhook are configured via bot commands and persisted in the Wickr IO key-value store.
