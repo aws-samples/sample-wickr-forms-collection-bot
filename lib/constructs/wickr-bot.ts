@@ -119,7 +119,7 @@ export class WickrBot extends Construct {
       environment: {
         CREDENTIALS_ARN: props.credentialsArn,
         INTEGRATION_NAME: 'wickr-form-collection-bot',
-        REPORTS_BUCKET_NAME: props.reportsBucket.bucketName,
+        REPORTS_BUCKET: props.reportsBucket.bucketName,
         AWS_REGION: region,
       },
       healthCheck: {

@@ -256,7 +256,7 @@ async function main() {
     BOT_USERNAME: process.env.BOT_USERNAME || '<not set>',
     AWS_REGION: process.env.AWS_REGION || '<not set>',
     BEDROCK_MODEL_ID: process.env.BEDROCK_MODEL_ID || '<not set>',
-    REPORTS_BUCKET_NAME: process.env.REPORTS_BUCKET_NAME || '<not set>',
+    REPORTS_BUCKET: process.env.REPORTS_BUCKET || '<not set>',
     LOG_LEVEL: process.env.LOG_LEVEL || '<not set>'
   });
 
