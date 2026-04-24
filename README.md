@@ -288,6 +288,55 @@ This removes all resources created by the stack (VPC, ECS, S3 bucket, IAM roles)
 
 ---
 
+## Post-Deploy Configuration
+
+After deploying via either path, configure where confirmed reports are delivered. Each form type has independent delivery targets -- you can send Incident Reports to one room and Shift Handoff Reports to another.
+
+### S3 (automatic)
+
+If the `REPORTS_BUCKET` environment variable is set (Path B sets this automatically), confirmed reports are stored as JSON files in S3 under `<prefix>/<date>/<uuid>.json`. No additional configuration needed.
+
+For Path A, set the bucket name during the interactive `configure` step, or export it manually:
+```bash
+export REPORTS_BUCKET=my-reports-bucket
+```
+
+### Wickr Room
+
+From the room where you want reports delivered, message the bot:
+```
+/<form> set-room
+```
+For example, `/incident set-room` configures Incident Report delivery to that room. The room ID is persisted in the Wickr IO key-value store and survives bot restarts.
+
+To set one room as the delivery target for all form types at once:
+```
+/set-rooms
+```
+
+### Webhook
+
+Message the bot from any conversation:
+```
+/<form> set-webhook https://your-endpoint.example.com/reports
+```
+The bot POSTs confirmed reports as JSON to the URL. The webhook URL is persisted in the Wickr IO key-value store.
+
+### Verify Configuration
+
+Check the current delivery configuration for all forms:
+```
+/status
+```
+Or for a specific form:
+```
+/<form> status
+```
+
+Channels without configuration are skipped during delivery (with a failure note in the response). You can configure any combination of the three channels per form type.
+
+---
+
 ## Built-in Report Types
 
 ### Incident Report (`/incident`)
