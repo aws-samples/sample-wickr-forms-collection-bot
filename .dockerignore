@@ -1,7 +1,0 @@
-node_modules
-cdk.out
-*.tar.gz
-.git
-.kiro
-test
-mocks
