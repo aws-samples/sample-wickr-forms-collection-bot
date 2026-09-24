@@ -1,16 +1,163 @@
-# Configuration for Form Collection Bot CDK deployment
-# Copy to config.yaml and fill in your values.
+# Configuration for the Wickr Forms Collection Bot CDK deployment.
+# Copy to config.yaml and replace every <placeholder> with your own value.
+# config.yaml is gitignored because it holds account- and network-specific identifiers.
+#
+# Defaults target AWS GovCloud (us-gov-west-1). The stack resolves the IAM partition at
+# synth time, so it also deploys to commercial AWS -- see the notes on bedrockModelId and
+# credentialsArn below for the two values that differ between partitions.
 
-# AWS account and region
-account: "123456789012"
-region: "us-east-1"
+# ---------------------------------------------------------------------------
+# Required
+# ---------------------------------------------------------------------------
 
-# ARN of the Secrets Manager secret containing bot credentials
-# Format: {"username":"<bot-username>","password":"<bot-password>"}
-credentialsArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:wickr-bot-credentials"
+# Target AWS account and region.
+account: "<your-account-id>"
+region: "us-gov-west-1"
 
-# Optional: existing VPC ID. If omitted, a new VPC is created.
-# vpcId: "vpc-0123456789abcdef0"
+# Optional. Name of the deployed CloudFormation stack. Defaults to
+# "FormCollectionBotStack".
+#
+# Set this to deploy more than one instance into the same account and region -- a test stack
+# alongside an existing one, for example. It is also the clean way past a same-named stack
+# left over from an earlier deployment, whose retained resources can otherwise cause an
+# update to fail (for instance an existing reports bucket that no longer accepts the ACL the
+# stack applies).
+#
+# Changing it does NOT renumber the resources inside the stack: logical IDs come from the
+# construct path, and the construct ID is fixed independently of this value.
+#
+# Each stack name is a separate deployment with its own VPC, bucket, and ECS service. Two
+# stacks running with the SAME Wickr credentials will fight over the session, which presents
+# as a bot that responds intermittently -- give each one its own bot account.
+# stackName: "FormCollectionBotStack"
 
-# Set to true to enable ECS Exec for debugging
-isDevelopmentEnv: true
+# ARN of the Secrets Manager secret holding the bot's Wickr credentials.
+# Secret value format: {"username":"<bot-username>","password":"<bot-password>"}
+#
+# Secrets Manager appends a random 6-character suffix to the name, so you cannot predict
+# this ARN -- create the secret first, then paste the ARN it returns. The task role's IAM
+# policy is scoped to exactly this ARN.
+#
+# Partition prefix: "arn:aws-us-gov:" in GovCloud, "arn:aws:" in commercial.
+credentialsArn: "arn:aws-us-gov:secretsmanager:<region>:<your-account-id>:secret:<secret-name>-<suffix>"
+
+# ---------------------------------------------------------------------------
+# Optional -- IAM permissions boundary
+# ---------------------------------------------------------------------------
+
+# Set this only if your organization denies iam:CreateRole unless the new role carries an
+# approved permissions boundary. The stack creates two roles (the ECS task role and the
+# task execution role) and both get this boundary attached.
+#
+# This is SEPARATE from `cdk bootstrap --custom-permissions-boundary`. That flag attaches
+# the boundary to the bootstrap CloudFormationExecutionRole only; it does not reach roles
+# created by this stack. If your org has such a guardrail you need BOTH, otherwise
+# bootstrapping succeeds and the deploy then fails with an AccessDenied on CreateRole.
+#
+# Give the full managed policy ARN, not the name -- boundary policies commonly live under
+# an IAM path (arn:...:policy/some/path/BoundaryName) and a bare name cannot express that.
+# Ask your cloud or IAM team for the approved boundary ARN.
+# permissionsBoundaryArn: "arn:aws-us-gov:iam::<your-account-id>:policy/<boundary-name>"
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+network:
+  # "imported"       -- production. The VPC, subnets, Transit Gateway attachment, and
+  #                     routing are owned by the network team. This stack creates NO
+  #                     network resources: no VPC, no internet gateway, no NAT gateway.
+  #                     Required in Army/DISA SCCA environments, where NAT gateways are
+  #                     not permitted and outbound traffic egresses through the Transit
+  #                     Gateway to the Virtual Datacenter Security Stack (VDSS).
+  # "create-dev-vpc" -- demo/development ONLY. Creates a VPC with public subnets and a
+  #                     NAT gateway. Not valid in an SCCA environment. Use this for a
+  #                     test account with no Transit Gateway attachment.
+  mode: "imported"
+
+  # Only used when mode is "create-dev-vpc". Ignored in "imported" mode, which creates no
+  # network resources. Defaults to true.
+  #
+  # true  -- create a NAT gateway. The task runs in a private subnet with no public IP.
+  # false -- no NAT gateway. The task runs in a PUBLIC subnet with a PUBLIC IP, because
+  #          Fargate cannot reach the internet from a public subnet without one. This is
+  #          cheaper (a NAT gateway bills hourly plus data processing) and is fine for a
+  #          short-lived dev or demo stack. It is a weaker posture: the task has a public
+  #          address, though the security group still has no inbound rules, so nothing on
+  #          the internet can open a connection to it.
+  #
+  # Neither option is valid in an SCCA environment -- use mode "imported" there.
+  # useNatGateway: true
+
+  # Required when mode is "imported". Supplied by the team that owns the VPC.
+  # Leave commented out when mode is "create-dev-vpc".
+  vpcId: "<vpc-id>"
+
+  # Required when mode is "imported". Explicit subnet IDs for the Fargate task.
+  # Must have a default route to the Transit Gateway attachment. List two or more
+  # subnets in different Availability Zones for resilience.
+  # Subnet IDs are used directly -- subnet type selection is deliberately NOT used,
+  # because CDK classifies TGW-routed subnets as isolated rather than private-with-egress.
+  subnetIds:
+    - "<subnet-id-az-a>"
+    - "<subnet-id-az-b>"
+
+  # Create VPC endpoints for Bedrock, Transcribe, Secrets Manager,
+  # CloudWatch Logs, ECR (api + dkr), and S3 (gateway).
+  # Set true to keep AWS service traffic off the VDSS inspection path -- recommended
+  # when the environment does not already provide these endpoints.
+  # Set false if the environment already has them (duplicates are wasteful, and a VPC
+  # supports only one S3 gateway endpoint per route table) or if hairpinning AWS API
+  # traffic through the VDSS is acceptable.
+  createVpcEndpoints: false
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+# Optional. Import an existing reports bucket instead of letting the stack create one.
+# Leave commented out for a new deployment -- the stack then creates a hardened,
+# versioned, encrypted bucket and retains it on stack deletion.
+# reportsBucketName: "<existing-bucket-name>"
+
+# Container image, built and pushed by build-and-push-image.sh (see README Step 3).
+# The repository must already exist in the deploying account; this stack does not
+# create it. Always use an immutable tag so deployments are reproducible.
+ecrRepositoryName: "wickr-form-collection-bot"
+imageTag: "<image-tag>"
+
+# Optional. Set this only to pull the image from an ECR repository in a DIFFERENT
+# account or region than the one you are deploying into. Omit it and the repository
+# named above is resolved in the deploying account and region.
+#
+# The repository name in this ARN must match ecrRepositoryName above; the app fails
+# fast at synth if they disagree.
+#
+# Cross-account pulls also require the SOURCE repository to grant this account
+# ecr:BatchGetImage and ecr:GetDownloadUrlForLayer via a repository policy. This stack
+# cannot create that policy because it does not own the repository -- see the README.
+#
+# Cross-PARTITION pulls are impossible: an image in GovCloud (aws-us-gov) cannot be
+# pulled into commercial (aws), or vice versa. Build and push into the target partition.
+# ecrRepositoryArn: "arn:aws-us-gov:ecr:<region>:<image-account-id>:repository/wickr-form-collection-bot"
+
+# Wickr integration name. Must match the tarball path staged inside the image at
+# /usr/lib/wickr/integrations/software/<integrationName>/software.tar.gz
+integrationName: "wickr-form-collection-bot"
+
+# Bedrock model used for report classification and field extraction. Any
+# Converse-capable model works; change this value and redeploy to switch models.
+#
+# GovCloud requires newer Anthropic models to be invoked through an inference profile,
+# hence the "us-gov." prefix. In commercial AWS use the "us." prefix instead, e.g.
+# us.anthropic.claude-sonnet-4-5-20250929-v1:0
+#
+# Confirm the model is enabled in your account first:
+#   aws bedrock list-inference-profiles --region <region>
+bedrockModelId: "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+# Log verbosity: DEBUG, INFO, WARN, ERROR.
+logLevel: "INFO"
+
+# true enables ECS Exec (interactive shell into the task) for debugging. Leave false
+# for production -- it grants ssmmessages:* to the task role.
+isDevelopmentEnv: false

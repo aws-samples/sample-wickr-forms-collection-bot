@@ -1,0 +1,645 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+Description: >-
+  Builds the Wickr Forms Collection Bot container image with AWS CodeBuild and pushes it
+  to Amazon ECR. Replaces build-and-push-image.sh for anyone who cannot run Docker
+  locally. Creates an S3 bucket to upload the source to, a CodeBuild project, an IAM role
+  scoped to pushing one ECR repository, a CloudWatch log group, and optionally the ECR
+  repository (with image retention) and an SNS build-failure notification.
+  See docs/DEPLOY-CDK-CODEBUILD.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Image destination
+        Parameters:
+          - EcrRepositoryName
+          - CreateEcrRepository
+      - Label:
+          default: Bot configuration
+        Parameters:
+          - IntegrationName
+          - BaseImage
+          - BaseImageRepositoryName
+      - Label:
+          default: Build environment
+        Parameters:
+          - ProjectName
+          - BuildImage
+          - LogRetentionDays
+      - Label:
+          default: Retention and alerting
+        Parameters:
+          - MaxTaggedImages
+          - NotificationEmail
+
+Parameters:
+  EcrRepositoryName:
+    Type: String
+    Default: wickr-form-collection-bot
+    Description: >-
+      ECR repository the image is pushed to. Must match ecrRepositoryName in config.yaml.
+    AllowedPattern: '^[a-z0-9][a-z0-9._/-]*$'
+    ConstraintDescription: >-
+      ECR repository names must start with a lowercase letter or digit and may contain
+      only lowercase letters, digits, periods, underscores, hyphens, and forward slashes.
+
+  CreateEcrRepository:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Create the ECR repository as part of this stack. Set to false if you already ran the
+      "aws ecr create-repository" command from Phase 1 step 4 of the deployment guide,
+      otherwise the stack fails with RepositoryAlreadyExistsException.
+
+  IntegrationName:
+    Type: String
+    Default: wickr-form-collection-bot
+    Description: >-
+      Wickr integration name baked into the image. MUST match integrationName in
+      config.yaml. WickrIOSvr looks for the bot code at
+      /usr/lib/wickr/integrations/software/<name>/software.tar.gz, and if the two disagree
+      the container starts but the bot never runs.
+    AllowedPattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$'
+    ConstraintDescription: >-
+      Becomes a directory name inside the image, so it must be path-safe: letters, digits,
+      period, underscore, and hyphen only.
+
+  BaseImage:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Wickr IO base image pinned by digest. Leave empty to use the digest pinned
+      in the Dockerfile, which is pulled from public.ecr.aws. Set this to a private ECR
+      image URI if this build has no route to the public ECR gallery. If you do, also set
+      BaseImageRepositoryName so the build role can actually read that repository.
+    AllowedPattern: '^$|^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,511}$'
+    ConstraintDescription: >-
+      Must be empty or a plain image reference, optionally with @sha256:<digest>.
+
+  BaseImageRepositoryName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional, and only needed alongside BaseImage. Name of a repository IN THIS ACCOUNT
+      holding a mirrored copy of the Wickr IO base image. Setting it grants the build role
+      read-only pull access to that repository. Without it the documented egress-blocked
+      workaround fails at the Dockerfile FROM line with an authorization error, because
+      the role's pull permissions cover only the output repository.
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9._/-]{0,255}$'
+    ConstraintDescription: >-
+      Must be empty or a valid lowercase ECR repository name.
+
+  ProjectName:
+    Type: String
+    Default: wickr-form-collection-bot-image-build
+    Description: Name of the CodeBuild project.
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9\-_]{1,254}$'
+
+  BuildImage:
+    Type: String
+    Default: aws/codebuild/standard:7.0
+    Description: >-
+      CodeBuild managed image. The build only needs docker, tar, and the AWS CLI, so any
+      current standard image works. Change this if the default is unavailable in your
+      region; list what you have with "aws codebuild list-curated-environment-images".
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: How long to keep build logs in CloudWatch Logs.
+
+  MaxTaggedImages:
+    Type: Number
+    Default: 20
+    MinValue: 3
+    MaxValue: 500
+    Description: >-
+      How many tagged images to keep in the ECR repository. Each build adds roughly 1 GB and
+      tags are immutable, so without a limit the repository grows without bound.
+      READ THIS BEFORE LOWERING IT: expiring an image does not stop a running task, but it
+      does break that task's next restart or scale-out, and the failure surfaces later and
+      looks unrelated. The count must comfortably exceed the number of builds you do between
+      deployments. The default of 20 is deliberately generous. Only applies when this stack
+      creates the repository.
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Email address to notify when a build fails or is stopped. Leave empty and no
+      topic or rule is created, in which case nothing tells you a build failed -- you have to
+      poll the build status yourself.
+      Setting it creates an SNS topic and an EventBridge rule. AWS sends a subscription
+      confirmation you must accept before any notification arrives. You can subscribe further
+      endpoints (Slack via AWS Chatbot, a webhook) to the topic ARN in the stack outputs.
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ConstraintDescription: Must be empty or a valid email address.
+
+Conditions:
+  ShouldCreateEcrRepository: !Equals [!Ref CreateEcrRepository, 'true']
+  HasBaseImageRepository: !Not [!Equals [!Ref BaseImageRepositoryName, '']]
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+  EcrEncryptionKey:
+    Type: AWS::KMS::Key
+    Condition: ShouldCreateEcrRepository
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      Description: Encrypts Wickr forms bot container images in ECR
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  NotificationEncryptionKey:
+    Type: AWS::KMS::Key
+    Condition: HasNotificationEmail
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      Description: Encrypts Wickr forms bot build-failure notifications
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowEventBridgeToUseKey
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+
+  SourceAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Dedicated server-access-log destination; logging it to itself would recurse.
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_LOGGING_ENABLED
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Versioning protects the access-log record from overwrite or deletion.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  SourceAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceAccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3LogDeliveryAclCheck
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt SourceAccessLogsBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: AllowS3LogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${SourceAccessLogsBucket.Arn}/source-bucket/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+              ArnLike:
+                'aws:SourceArn': !GetAtt SourceBucket.Arn
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt SourceAccessLogsBucket.Arn
+              - !Sub '${SourceAccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # Source of truth for what gets built. You upload source.zip here; CodeBuild reads it.
+  # The name is generated by CloudFormation so the template can be deployed more than once
+  # in an account without a name collision.
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      # SSE-S3. Note there is deliberately no BucketKeyEnabled here: S3 Bucket Keys are an
+      # SSE-KMS cost optimization and have no meaning under AES256.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref SourceAccessLogsBucket
+        LogFilePrefix: source-bucket/
+      # CodeBuild reads a specific object version per build, so versioning keeps a record
+      # of exactly which source produced which image.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldSourceVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt SourceBucket.Arn
+              - !Sub '${SourceBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Condition: ShouldCreateEcrRepository
+    # The running ECS service pulls from this repository by tag. Deleting it out from under
+    # a live service would break task starts, so it outlives the build stack.
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      RepositoryName: !Ref EcrRepositoryName
+      # Refuses to overwrite an existing tag. This is the registry-level counterpart to the
+      # buildspec rejecting "latest": a tag always means one exact image. Consequence to
+      # know about: rebuilding with a tag you already pushed fails. Let the buildspec
+      # generate a fresh timestamp tag instead of reusing one.
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt EcrEncryptionKey.Arn
+      # Bounded storage. Rules are evaluated in rulePriority order.
+      #
+      # Rule 1 is risk-free: untagged images only exist here as debris from a replaced or
+      # abandoned manifest, and nothing references them.
+      #
+      # Rule 2 is the one to understand. Expiring an image does NOT disturb a task that is
+      # already running -- the layers are on the host -- but it DOES break that task's next
+      # restart, scale-out, or replacement, with an ECS pull failure that reads as unrelated to
+      # an ECR cleanup weeks earlier. Keep MaxTaggedImages comfortably above the number of
+      # builds you run between deployments.
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Delete untagged images after 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only the newest ${MaxTaggedImages} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${MaxTaggedImages}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Deliberately deleted with the stack, unlike the bucket and repository above. A
+    # retained log group keeps its name, so deleting and recreating this stack would then
+    # fail with "log group already exists". Build logs are diagnostic output, not the
+    # artifact, so losing them with the stack is the right trade.
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Service role for the Wickr forms bot image build
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+            # Confused-deputy guards: assumable only on behalf of build projects in this
+            # account, and only this project.
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${ProjectName}'
+      Policies:
+        - PolicyName: BuildAndPushImage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteBuildLogs
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub '${BuildLogGroup.Arn}:*'
+
+              # GetAuthorizationToken has no resource to scope to; ECR requires "*".
+              - Sid: AuthenticateToEcr
+                Effect: Allow
+                Action: 'ecr:GetAuthorizationToken'
+                Resource: '*'
+
+              # Scoped to the one repository this project builds. The three layer-upload
+              # actions upload new layer bytes; BatchCheckLayerAvailability avoids uploading
+              # layers already present; PutImage writes the manifest; BatchGetImage and
+              # GetDownloadUrlForLayer let Docker read existing manifests and layers.
+              # There is nothing here for public.ecr.aws: the base image is pulled
+              # anonymously, and ECR Public is not available in GovCloud.
+              - Sid: PushBotImage
+                Effect: Allow
+                Action:
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:PutImage'
+                  # Reads let Docker skip re-uploading layers already present.
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}'
+
+              # Read-only pull on a same-account mirror of the Wickr IO base image, added
+              # only when BaseImageRepositoryName is set. This is what makes the
+              # egress-blocked workaround in docs/DEPLOY-CDK-CODEBUILD.md work: the
+              # PushBotImage statement above covers the OUTPUT repository, so without this
+              # statement the Dockerfile FROM line fails to authorize against the mirror.
+              - !If
+                - HasBaseImageRepository
+                - Sid: PullMirroredBaseImage
+                  Effect: Allow
+                  Action:
+                    - 'ecr:BatchGetImage'
+                    - 'ecr:GetDownloadUrlForLayer'
+                    - 'ecr:BatchCheckLayerAvailability'
+                  Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${BaseImageRepositoryName}'
+                - !Ref 'AWS::NoValue'
+
+              - Sid: ReadUploadedSource
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                Resource: !Sub '${SourceBucket.Arn}/*'
+
+              - Sid: ListSourceBucket
+                Effect: Allow
+                Action: 's3:ListBucket'
+                Resource: !GetAtt SourceBucket.Arn
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref ProjectName
+      Description: Builds and pushes the Wickr Forms Collection Bot container image
+      ServiceRole: !GetAtt BuildRole.Arn
+      # The image is pushed to ECR by the buildspec, so there is nothing for CodeBuild to
+      # hand back as an artifact.
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: S3
+        Location: !Sub '${SourceBucket}/source.zip'
+        BuildSpec: buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        # ARM and 2xlarge compute are not available in GovCloud. MEDIUM (4 vCPU, 7 GB)
+        # comfortably handles the Wickr base image layers; SMALL is slower but works.
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Ref BuildImage
+        # Required to run a Docker daemon inside the build container. Without it,
+        # "docker build" fails with "Cannot connect to the Docker daemon".
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPO_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcrRepositoryName
+          - Name: INTEGRATION_NAME
+            Type: PLAINTEXT
+            Value: !Ref IntegrationName
+          - Name: BASE_IMAGE
+            Type: PLAINTEXT
+            Value: !Ref BaseImage
+      # No VpcConfig on purpose. An unattached project runs on AWS-managed networking with
+      # outbound internet access, which is what lets it pull the base image from
+      # public.ecr.aws -- that gallery is not hosted in GovCloud, and cross-partition ECR
+      # pull-through cache is not supported. Attaching this project to an SCCA VPC with no
+      # NAT gateway breaks the pull unless you first mirror the base image into a private
+      # ECR repository and pass it as the BaseImage parameter.
+      TimeoutInMinutes: 30
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogGroup
+
+  # ---------------------------------------------------------------------------
+  # Build failure notification. Created only when NotificationEmail is set.
+  #
+  # Without this, a failed build is silent: CodeBuild does not notify anyone, so you learn
+  # about it by polling build status or noticing the image never appeared.
+  # ---------------------------------------------------------------------------
+  BuildNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasNotificationEmail
+    Properties:
+      DisplayName: Wickr forms bot image build failures
+      KmsMasterKeyId: !Ref NotificationEncryptionKey
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # Lets EventBridge publish to the topic. Without this the rule matches and silently drops
+  # the event, which is worse than no rule at all.
+  BuildNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasNotificationEmail
+    Properties:
+      Topics:
+        - !Ref BuildNotificationTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref BuildNotificationTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+
+  BuildFailureRule:
+    Type: AWS::Events::Rule
+    Condition: HasNotificationEmail
+    Properties:
+      Description: !Sub 'Notify when ${ProjectName} fails or is stopped'
+      EventPattern:
+        source:
+          - aws.codebuild
+        detail-type:
+          - CodeBuild Build State Change
+        detail:
+          # Scoped to this project so the rule stays quiet about other builds in the account.
+          project-name:
+            - !Ref ProjectName
+          # SUCCEEDED and IN_PROGRESS are deliberately excluded -- this is an alert, not a feed.
+          build-status:
+            - FAILED
+            - STOPPED
+      State: ENABLED
+      Targets:
+        - Id: NotifyTopic
+          Arn: !Ref BuildNotificationTopic
+          # Without a transformer the message is the full raw event, which is verbose and buries
+          # the useful fields.
+          InputTransformer:
+            InputPathsMap:
+              project: '$.detail.project-name'
+              status: '$.detail.build-status'
+              buildId: '$.detail.build-id'
+              region: '$.region'
+            InputTemplate: |
+              "Wickr forms bot image build <status>."
+              "Project: <project>"
+              "Build:   <buildId>"
+              "Logs:    aws logs tail /aws/codebuild/<project> --region <region> --since 30m"
+
+Outputs:
+  SourceBucketName:
+    Description: Upload source.zip here, then start a build
+    Value: !Ref SourceBucket
+
+  ProjectName:
+    Description: CodeBuild project name
+    Value: !Ref BuildProject
+
+  EcrRepositoryUri:
+    Description: Repository the image is pushed to
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}'
+
+  UploadCommand:
+    Description: >-
+      Step 1 - upload the source archive. Uses s3api put-object rather than s3 cp so it
+      returns the object VersionId, which step 2 needs to pin the build to this exact upload.
+    Value: !Sub >-
+      aws s3api put-object --bucket ${SourceBucket} --key source.zip --body source.zip
+      --region ${AWS::Region} --query VersionId --output text
+
+  StartBuildCommand:
+    Description: >-
+      Step 2 - start the build. Pass --source-version <VersionId from step 1> so the build is
+      pinned to that upload instead of whatever is current when it starts.
+    Value: !Sub >-
+      aws codebuild start-build --project-name ${ProjectName} --region ${AWS::Region}
+      --source-version <VersionId-from-step-1>
+
+  BuildLogsCommand:
+    Description: >-
+      Read build logs. MSYS_NO_PATHCONV=1 is required in Git Bash on Windows, which would
+      otherwise rewrite the leading slash into a Windows path and fail validation.
+    Value: !Sub >-
+      MSYS_NO_PATHCONV=1 aws logs tail /aws/codebuild/${ProjectName}
+      --region ${AWS::Region} --since 30m
+
+  BuildNotificationTopicArn:
+    Condition: HasNotificationEmail
+    Description: >-
+      SNS topic for build failures. Confirm the emailed subscription before expecting alerts;
+      subscribe additional endpoints to this ARN as needed.
+    Value: !Ref BuildNotificationTopic

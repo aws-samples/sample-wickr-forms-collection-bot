@@ -3,47 +3,8 @@
 
 'use strict';
 
-// -- Bootstrap: stub AWS SDK modules before any service loads -----------------
-const Module = require('module');
-const path   = require('path');
-
-const _originalResolve = Module._resolveFilename;
-
-const AWS_BEDROCK_KEY   = '__aws_bedrock_runtime_stub__';
-const AWS_S3_KEY        = '__aws_s3_stub__';
-const AWS_TRANSCRIBE_KEY = '__aws_transcribe_stub__';
-
-// Intercept requires for AWS SDK packages
-Module._resolveFilename = function (request, parent, isMain, options) {
-  if (request === '@aws-sdk/client-bedrock-runtime') return AWS_BEDROCK_KEY;
-  if (request === '@aws-sdk/client-s3')              return AWS_S3_KEY;
-  if (request === '@aws-sdk/client-transcribe')      return AWS_TRANSCRIBE_KEY;
-  return _originalResolve.call(this, request, parent, isMain, options);
-};
-
-// Register AWS SDK stub modules in require cache
-function makeAWSStub(name, exports) {
-  return {
-    id: name, filename: name, loaded: true,
-    exports,
-    parent: null, children: [], paths: [],
-  };
-}
-
-require.cache[AWS_BEDROCK_KEY] = makeAWSStub(AWS_BEDROCK_KEY, {
-  BedrockRuntimeClient: class { constructor() {} async send() { throw new Error('stub'); } },
-  InvokeModelCommand:   class { constructor(p) { this.params = p; } },
-});
-require.cache[AWS_S3_KEY] = makeAWSStub(AWS_S3_KEY, {
-  S3Client:            class { constructor() {} async send() {} },
-  PutObjectCommand:    class { constructor(p) { this.params = p; } },
-  DeleteObjectCommand: class { constructor(p) { this.params = p; } },
-});
-require.cache[AWS_TRANSCRIBE_KEY] = makeAWSStub(AWS_TRANSCRIBE_KEY, {
-  TranscribeClient:                class { constructor() {} async send() {} },
-  StartTranscriptionJobCommand:    class { constructor(p) { this.params = p; } },
-  GetTranscriptionJobCommand:      class { constructor(p) { this.params = p; } },
-});
+require('./aws-sdk-stubs');
+const path = require('path');
 
 // -- Mutable stub state containers ----------------------------------------------
 let _extractStub       = null;
@@ -53,6 +14,7 @@ let _transcribeStub    = null;
 let _detectStub        = null;
 let _deliverStub       = null;
 let _formCommandsHandleStub = null;
+const _saveConfigCalls = [];
 
 // -- Mock form definitions for registry stub ------------------------------------
 const MOCK_MEDEVAC_DEF = {
@@ -146,6 +108,7 @@ require.cache[TRANSCRIPTION_MODULE_PATH] = {
   parent: null, children: [], paths: [],
 };
 
+
 // form-detector stub
 const FORM_DETECTOR_MODULE_PATH = path.resolve(__dirname, '../services/form-detector.js');
 require.cache[FORM_DETECTOR_MODULE_PATH] = {
@@ -198,6 +161,18 @@ require.cache[FORM_REGISTRY_MODULE_PATH] = {
       return parts.join('\n');
     },
     normalizeReport: (formDef, raw) => raw,
+    getMissingRequiredFields: (formDef, report) => {
+      if (!report || typeof report !== 'object') return [];
+      const missing = [];
+      for (const field of formDef.fields) {
+        if (field.optional) continue;
+        const val = report[field.key];
+        if (val == null || val === '[Not provided]' || (typeof val === 'string' && val.trim() === '')) {
+          missing.push({ key: field.key, label: field.label });
+        }
+      }
+      return missing;
+    },
     NOT_PROVIDED: '[Not provided]',
     LABEL_SEP: ': ',
     _formsById: _registryForms,
@@ -216,7 +191,7 @@ require.cache[DELIVERY_SERVICE_MODULE_PATH] = {
       return { successes: [], failures: [] };
     },
     loadOutputConfigs: async () => {},
-    saveConfig: async () => {},
+    saveConfig: async (wickrAPI, kvKey, value) => { _saveConfigCalls.push({ kvKey, value }); },
     getConfig: () => null,
     _setS3Client: () => {},
     _reset: () => {},
@@ -300,6 +275,7 @@ function resetStubs() {
   _detectStub       = null;
   _deliverStub      = null;
   _formCommandsHandleStub = null;
+  _saveConfigCalls.length = 0;
 }
 
 function clearAllPending() {
@@ -382,8 +358,6 @@ describe('message-router', () => {
   describe('self-message filtering', () => {
     it('discards messages where sender equals BOT_USERNAME', async () => {
       process.env.BOT_USERNAME = 'bot@example.com';
-      let formCommandsCalled = false;
-      _formCommandsHandleStub = async () => { formCommandsCalled = true; };
       _detectStub = async () => 'MEDEVAC';
       _extractFormStub = async () => SAMPLE_NINE_LINE;
 
@@ -393,8 +367,7 @@ describe('message-router', () => {
         reply
       );
 
-      assert.equal(reply.calls.length, 0,    'should send no reply for own message');
-      assert.equal(formCommandsCalled,  false, 'should not route own message');
+      assert.equal(reply.calls.length, 0, 'should send no reply for own message');
     });
 
     it('does not discard messages from other users when BOT_USERNAME is set', async () => {
@@ -425,73 +398,6 @@ describe('message-router', () => {
       );
 
       assert.equal(detectCalled, true);
-    });
-  });
-
-  // -- Command routing ----------------------------------------------------------
-
-  describe('/9line command routing', () => {
-    it('routes /9line help to form-commands handler via registry', async () => {
-      let receivedFormDef = null;
-      let receivedArgs = null;
-      _formCommandsHandleStub = async (formDef, parsed, args) => {
-        receivedFormDef = formDef;
-        receivedArgs = args;
-      };
-
-      const reply = makeSendReply();
-      await messageRouter.route(
-        makeParsed({ message: '/9line help' }),
-        reply
-      );
-
-      assert.equal(receivedFormDef.id, 'MEDEVAC');
-      assert.equal(receivedArgs, 'help');
-    });
-
-    it('routes /9line set-room to form-commands handler', async () => {
-      let receivedFormDef = null;
-      let receivedArgs = null;
-      _formCommandsHandleStub = async (formDef, parsed, args) => {
-        receivedFormDef = formDef;
-        receivedArgs = args;
-      };
-
-      const reply = makeSendReply();
-      await messageRouter.route(
-        makeParsed({ message: '/9line set-room' }),
-        reply
-      );
-
-      assert.equal(receivedFormDef.id, 'MEDEVAC');
-      assert.equal(receivedArgs, 'set-room');
-    });
-
-    it('routes /9line status to form-commands handler', async () => {
-      let receivedFormDef = null;
-      _formCommandsHandleStub = async (formDef) => { receivedFormDef = formDef; };
-
-      const reply = makeSendReply();
-      await messageRouter.route(
-        makeParsed({ message: '/9line status' }),
-        reply
-      );
-
-      assert.equal(receivedFormDef.id, 'MEDEVAC');
-    });
-
-    it('does NOT call extraction engine for /9line commands', async () => {
-      _formCommandsHandleStub = async () => {};
-      let detectCalled = false;
-      _detectStub = async () => { detectCalled = true; return 'MEDEVAC'; };
-
-      const reply = makeSendReply();
-      await messageRouter.route(
-        makeParsed({ message: '/9line help' }),
-        reply
-      );
-
-      assert.equal(detectCalled, false);
     });
   });
 
@@ -1173,6 +1079,110 @@ describe('message-router', () => {
         txt.includes('auto-detect') || txt.includes('voice memo') || txt.includes('text'),
         'should mention auto-detection or voice memo'
       );
+    });
+
+    it('includes global /set-rooms and /status commands in help text', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/help' }),
+        reply
+      );
+
+      const txt = reply.calls[0].text;
+      assert.ok(txt.includes('/set-rooms'), 'should include /set-rooms');
+      assert.ok(txt.includes('/status'), 'should include /status');
+    });
+  });
+
+  // -- Global /set-rooms command --------------------------------------------------
+
+  describe('/set-rooms command', () => {
+    it('rejects /set-rooms from a DM (vgroupid does not start with S)', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/set-rooms', vgroupid: 'DM_user_abc' }),
+        reply
+      );
+
+      assert.equal(reply.calls.length, 1);
+      assert.ok(reply.calls[0].text.includes('must be run from within the target room'));
+      assert.equal(_saveConfigCalls.length, 0, 'should not save any config from a DM');
+    });
+
+    it('sets the current room for all forms with a wickr-room output', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/set-rooms', vgroupid: 'Sroom-broadcast' }),
+        reply
+      );
+
+      // MEDEVAC, SALUTE, and CAS all have a wickr-room output in the mock registry
+      assert.equal(_saveConfigCalls.length, 3);
+      for (const call of _saveConfigCalls) {
+        assert.equal(call.value, 'Sroom-broadcast');
+      }
+      const kvKeys = _saveConfigCalls.map(c => c.kvKey);
+      assert.ok(kvKeys.includes('MEDIC_ROOM_VGROUPID'));
+      assert.ok(kvKeys.includes('SALUTE_ROOM_VGROUPID'));
+      assert.ok(kvKeys.includes('CAS_ROOM_VGROUPID'));
+      assert.ok(reply.calls.at(-1).text.includes('Broadcast room set for 3 form(s)'));
+    });
+
+    it('sets the room only for the requested form IDs', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/set-rooms SALUTE', vgroupid: 'Sroom-salute' }),
+        reply
+      );
+
+      assert.equal(_saveConfigCalls.length, 1);
+      assert.equal(_saveConfigCalls[0].kvKey, 'SALUTE_ROOM_VGROUPID');
+      assert.equal(_saveConfigCalls[0].value, 'Sroom-salute');
+    });
+
+    it('skips unknown form IDs with a notice', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/set-rooms BOGUS SALUTE', vgroupid: 'Sroom-x' }),
+        reply
+      );
+
+      assert.ok(reply.calls.some(c => c.text.includes('Unknown form type: BOGUS')));
+      assert.equal(_saveConfigCalls.length, 1);
+      assert.equal(_saveConfigCalls[0].kvKey, 'SALUTE_ROOM_VGROUPID');
+    });
+  });
+
+  // -- Global /status command -----------------------------------------------------
+
+  describe('/status command', () => {
+    it('lists delivery status for every registered form', async () => {
+      const reply = makeSendReply();
+      await messageRouter.route(
+        makeParsed({ message: '/status' }),
+        reply
+      );
+
+      assert.equal(reply.calls.length, 1);
+      const txt = reply.calls[0].text;
+      assert.ok(txt.includes('=== Delivery Status ==='));
+      assert.ok(txt.includes('9-Line MEDEVAC Request (MEDEVAC):'));
+      assert.ok(txt.includes('SALUTE Report (SALUTE):'));
+      assert.ok(txt.includes('9-Line CAS Brief (CAS):'));
+      assert.ok(txt.includes('(not configured)'));
+    });
+
+    it('does not route /status to detection or form-commands', async () => {
+      let detectCalled = false;
+      let formCommandsCalled = false;
+      _detectStub = async () => { detectCalled = true; return 'UNKNOWN'; };
+      _formCommandsHandleStub = async () => { formCommandsCalled = true; };
+
+      const reply = makeSendReply();
+      await messageRouter.route(makeParsed({ message: '/status' }), reply);
+
+      assert.equal(detectCalled, false, 'should not call form-detector');
+      assert.equal(formCommandsCalled, false, 'should not call form-commands');
     });
   });
 

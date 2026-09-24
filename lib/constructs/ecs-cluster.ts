@@ -17,7 +17,8 @@ export class EcsCluster extends Construct {
 
     this.cluster = new ecs.Cluster(this, 'Cluster', {
       vpc: props.vpc,
-      containerInsights: true,
+      // containerInsightsV2 replaces the deprecated boolean containerInsights prop.
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
   }
 }

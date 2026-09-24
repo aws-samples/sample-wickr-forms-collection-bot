@@ -6,6 +6,20 @@
 // Bootstrap mock resolution before any bot code loads
 require('./setup');
 
+// Stub form-detector so non-command text routed through the message router
+// never reaches Bedrock (bot.js delegates all routing to the router now).
+const path = require('path');
+const FORM_DETECTOR_MODULE_PATH = path.resolve(__dirname, '../services/form-detector.js');
+require.cache[FORM_DETECTOR_MODULE_PATH] = {
+  id: FORM_DETECTOR_MODULE_PATH, filename: FORM_DETECTOR_MODULE_PATH, loaded: true,
+  exports: {
+    detect: async () => 'UNKNOWN',
+    _setClient: () => {},
+    buildDetectionPrompt: () => '',
+  },
+  parent: null, children: [], paths: [],
+};
+
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -63,11 +77,15 @@ describe('handleMessage', () => {
       convotype: 'room',
       msgtype: 'message'
     }));
-    // Unknown commands are now delegated to the router which checks
-    // the registry before falling through to detection/extraction.
-    // The router handles the response, so we just verify no crash.
+    // Unknown commands are delegated to the router, which checks the registry
+    // before falling through to detection and extraction.
     await handleMessage('raw-message');
-    // No assertion on reply content -- the router handles it
+
+    assert.equal(mockAddon.cmdSendRoomMessage.mock.callCount(), 1);
+    const call = mockAddon.cmdSendRoomMessage.mock.calls[0];
+    assert.equal(call.arguments[0], 'Sroom123');
+    assert.equal(typeof call.arguments[1], 'string');
+    assert.ok(call.arguments[1].length > 0);
   });
 });
 

@@ -140,7 +140,13 @@ describe('Property 2: Level Filtering', () => {
         stdoutMock.mock.resetCalls();
         stderrMock.mock.resetCalls();
 
-        logger[level.toLowerCase()](comp, msg);
+        switch (level) {
+          case 'DEBUG': logger.debug(comp, msg); break;
+          case 'INFO': logger.info(comp, msg); break;
+          case 'WARN': logger.warn(comp, msg); break;
+          case 'ERROR': logger.error(comp, msg); break;
+          default: throw new Error(`Unexpected log level: ${level}`);
+        }
 
         const stdoutLines = capturedStdout();
         const stderrLines = capturedStderr();

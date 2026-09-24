@@ -55,7 +55,7 @@ async function handleHelp(formDef, vgroupid, sendReply) {
 
   // Show admin commands
   lines.push('Admin Commands:');
-  lines.push(`  ${formDef.command} help`, `    Show this help message.`);
+  lines.push(`  ${formDef.command} help`, `    Show this message.`);
   lines.push(`  ${formDef.command} status`, `    Show configuration status.`);
 
   const hasRoom = (formDef.outputs || []).some(o => o.type === 'wickr-room');
@@ -113,17 +113,12 @@ async function handleSetWebhook(formDef, urlArg, vgroupid, sendReply, wickrAPI, 
   const match = fullArgs.match(/https?:\/\/[^\s<>"'\]\[\(\)\u200b-\u200f\ufeff]+/i);
   const cleanUrl = match
     ? match[0].replace(/[^\x20-\x7E]/g, '').replace(/\/+$/, '').trim()
-    : fullArgs.replace(/[^\x20-\x7E]/g, '').trim();
+    : null;
   logger.debug('form-cmd', 'set_webhook_resolved', { correlationId, hasCleanUrl: !!cleanUrl });
 
   if (!cleanUrl) {
-    await sendReply(vgroupid, `Could not extract a URL from your message. Raw text received: "${fullArgs}"`);
-    return;
-  }
-
-  // Validate that the resolved value is an HTTP(S) URL
-  if (!/^https?:\/\//i.test(cleanUrl)) {
-    await sendReply(vgroupid, `Invalid URL: "${cleanUrl}". Webhook URL must start with http:// or https://.`);
+    await sendReply(vgroupid,
+      `Invalid URL. Usage: "${formDef.command} set-webhook https://example.com/hook"`);
     return;
   }
 

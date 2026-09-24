@@ -1,0 +1,45 @@
+# Account-specific deployment config (copy config.example.yaml to config.yaml)
+/config.yaml
+
+# Dependencies
+node_modules/
+
+# CDK output
+cdk.out/
+cdk.context.json
+
+# Build artifacts
+*.tar.gz
+*.log
+*.js.map
+
+# Runtime output. bot/start.sh does `mkdir -p logs`, and the Wickr logger writes .output and
+# -audit.json files there, none of which match *.log.
+logs/
+
+# Written by configure.sh from the configured bot username, and read back by start.sh.
+# Deployment-specific, created inside the container.
+client_bot_username.txt
+.env.configure
+.bot.pid
+
+# Source archive uploaded to the CodeBuild project (see docs/DEPLOY-CDK-CODEBUILD.md)
+source.zip
+
+# Compiled TypeScript (source of truth is .ts)
+bin/*.js
+bin/*.d.ts
+lib/**/*.js
+lib/**/*.d.ts
+test/**/*.js
+test/**/*.d.ts
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Never commit Kiro workspace config
+.kiro/
+
+# Local scanner config
+.protoshield/

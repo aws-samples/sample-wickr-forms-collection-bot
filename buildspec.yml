@@ -1,0 +1,239 @@
+version: 0.2
+
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# AWS CodeBuild replacement for build-and-push-image.sh.
+#
+# Use this when you cannot build the container image on your own machine -- either you
+# have no Docker installation, or you are on Windows, where a locally created tarball
+# loses the execute bit on the bot's shell scripts and the Wickr IO integration then
+# fails silently at container start. CodeBuild runs on Linux, so the permission problem
+# cannot occur.
+#
+# Produces exactly the same artifact as the script:
+#   <account>.dkr.ecr.<region>.amazonaws.com/<ECR_REPO_NAME>:<IMAGE_TAG>
+#
+# The CodeBuild project, its IAM role, and the S3 source bucket are created by
+# infrastructure/codebuild.yaml. See docs/DEPLOY-CDK-CODEBUILD.md.
+#
+# EVERYTHING RUNS IN ONE PHASE ON PURPOSE. Shell variables do not survive across
+# buildspec phases, and the obvious workaround -- writing an env file and sourcing it --
+# turns build inputs into executed shell code. Since any caller allowed to start a build
+# may override those inputs, that workaround hands arbitrary command execution inside a
+# privileged container to anyone holding codebuild:StartBuild. A single phase needs no
+# state transfer at all.
+#
+# Environment variables (all optional; the CloudFormation template sets the first three
+# on the project, and any of them can be overridden per build with
+# `aws codebuild start-build --environment-variables-override`):
+#
+#   ECR_REPO_NAME     Default wickr-form-collection-bot. Must match ecrRepositoryName
+#                     in config.yaml.
+#   INTEGRATION_NAME  Default wickr-form-collection-bot. MUST match integrationName in
+#                     config.yaml -- WickrIOSvr looks for the tarball at
+#                     /usr/lib/wickr/integrations/software/<name>/ and the bot silently
+#                     never starts if the two disagree.
+#   BASE_IMAGE        Wickr IO base image, pinned by digest. Empty means use the
+#                     Dockerfile default (pulled from public.ecr.aws). Set this to a
+#                     private ECR URI if this build cannot reach the public gallery, and
+#                     see the BaseImageRepositoryName stack parameter -- the build role
+#                     needs read access to that repository too.
+#   IMAGE_TAG         Immutable tag. Default <UTC timestamp>-<build number>, e.g.
+#                     20260820-141530-42. The build number makes the tag unique even if
+#                     two builds start in the same second, which matters because the ECR
+#                     repository rejects a tag that already exists.
+#                     "latest" is rejected: ECS caches by tag, so a mutable tag makes
+#                     deployments non-reproducible and can leave the service on old code.
+#   AWS_ACCOUNT_ID    Defaults to the account running the build, which is the only
+#                     account the project's role can push to.
+
+env:
+  # REQUIRED. CodeBuild runs Linux build commands in /bin/sh by default, which on the
+  # Ubuntu-based standard images is dash. This build needs bash for three things:
+  #   - "set -o pipefail", which dash rejects outright as an illegal option
+  #   - the build_args=(...) array used to assemble docker build flags
+  #   - shell functions with "local"
+  # Without this line the whole build phase dies on its very first line with
+  # "COMMAND_EXECUTION_ERROR ... set -euo pipefail" and exit status 2, producing no
+  # output at all, because dash fails while parsing before running anything.
+  shell: bash
+
+  variables:
+    ECR_REPO_NAME: "wickr-form-collection-bot"
+    INTEGRATION_NAME: "wickr-form-collection-bot"
+    BASE_IMAGE: ""
+    IMAGE_TAG: ""
+  # Surfaced in the build record so you can read the tag and the exact source revision
+  # without scraping the log:
+  #   aws codebuild batch-get-builds --ids <build-id> \
+  #     --query 'builds[0].exportedEnvironmentVariables'
+  exported-variables:
+    - IMAGE_URI
+    - IMAGE_TAG
+    - INTEGRATION_NAME
+    - SOURCE_VERSION_ID
+
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+
+        # ---------------------------------------------------------------------------
+        # Validate every input before it reaches a shell command, a tag, or a build arg.
+        # These values are caller-controlled via --environment-variables-override, so
+        # they are untrusted input even though starting a build requires permission.
+        # ---------------------------------------------------------------------------
+        # NOTE: the grep reads a here-string, not a pipe. Under "set -o pipefail" a piped
+        # "grep -q" reports the PIPELINE's status, and grep -q exits the moment it matches,
+        # which SIGPIPEs the writer and makes the pipeline return 141 even on a match. That
+        # inverts the test and rejects valid input. A here-string has no writer to kill.
+        require_pattern() {
+          local name="$1" value="$2" pattern="$3" explain="$4"
+          if ! grep -qE "$pattern" <<< "$value"; then
+            echo "ERROR: ${name}='${value}' is not permitted." >&2
+            echo "       ${explain}" >&2
+            exit 1
+          fi
+        }
+
+        AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+        require_pattern AWS_ACCOUNT_ID "$AWS_ACCOUNT_ID" '^[0-9]{12}$' \
+          'Must be a 12-digit AWS account ID.'
+
+        # A timestamp alone collides if two builds start in the same second, and the ECR
+        # repository refuses to overwrite an existing tag. CODEBUILD_BUILD_NUMBER is
+        # monotonic per project, so the pair is always unique.
+        IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y%m%d-%H%M%S)-${CODEBUILD_BUILD_NUMBER:-0}}"
+
+        if [ "$IMAGE_TAG" = "latest" ]; then
+          echo "ERROR: IMAGE_TAG must not be 'latest'. Use an immutable tag so deployments" >&2
+          echo "       are reproducible and so ECS actually pulls the new image." >&2
+          exit 1
+        fi
+
+        # Charsets below match what ECR and the Wickr integration path actually accept.
+        # They also exclude every shell metacharacter, which is what makes the
+        # interpolations further down safe.
+        require_pattern IMAGE_TAG "$IMAGE_TAG" '^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$' \
+          'ECR tags allow letters, digits, underscore, period, and hyphen only.'
+        require_pattern ECR_REPO_NAME "$ECR_REPO_NAME" '^[a-z0-9][a-z0-9._/-]{0,255}$' \
+          'ECR repository names are lowercase alphanumeric with . _ - / only.'
+        require_pattern INTEGRATION_NAME "$INTEGRATION_NAME" '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$' \
+          'This becomes a directory name inside the image; keep it path-safe.'
+        if [ -n "${BASE_IMAGE:-}" ]; then
+          require_pattern BASE_IMAGE "$BASE_IMAGE" '^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,511}$' \
+            'Must be a plain image reference, optionally @sha256:<digest>.'
+        fi
+
+        ECR_DOMAIN="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        IMAGE_URI="${ECR_DOMAIN}/${ECR_REPO_NAME}:${IMAGE_TAG}"
+
+        # Provenance: ties this image tag back to the exact S3 object version that built it.
+        #
+        # CODEBUILD_SOURCE_VERSION is the right variable here -- for an S3 source it holds
+        # the version ID of the input artifact. CODEBUILD_RESOLVED_SOURCE_VERSION is NOT a
+        # substitute: AWS documents it as unset for Amazon S3 sources, so using it silently
+        # recorded "unknown" and broke the tag-to-source link this is meant to provide.
+        SOURCE_VERSION_ID="${CODEBUILD_SOURCE_VERSION:-${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}}"
+
+        if [ "$SOURCE_VERSION_ID" = "unknown" ]; then
+          # Not fatal, but say so loudly rather than shipping an image with no provenance.
+          # The usual cause is starting a build without --source-version.
+          echo "WARNING: could not determine the S3 source version for this build." >&2
+          echo "         The image tag will have no recorded link back to its source." >&2
+          echo "         Pass --source-version <VersionId> to aws codebuild start-build." >&2
+        fi
+
+        export IMAGE_URI IMAGE_TAG INTEGRATION_NAME SOURCE_VERSION_ID
+
+        echo "=== Build plan ==="
+        echo "  image           : ${IMAGE_URI}"
+        echo "  integration     : ${INTEGRATION_NAME}"
+        echo "  source version  : ${SOURCE_VERSION_ID}"
+        echo "  base image      : ${BASE_IMAGE:-<Dockerfile default>}"
+
+        # ---------------------------------------------------------------------------
+        # Package the bot exactly the way build-and-push-image.sh does.
+        # ---------------------------------------------------------------------------
+        if [ ! -d bot ] || [ ! -f Dockerfile ] || [ ! -f start-bot.sh ]; then
+          echo "ERROR: the uploaded source zip must contain ./bot, ./Dockerfile and" >&2
+          echo "       ./start-bot.sh at its root. Zip the CONTENTS of the repository," >&2
+          echo "       not the folder itself." >&2
+          exit 1
+        fi
+
+        # Set the execute bit before packaging. This is the whole reason the build runs on
+        # a Linux host: the Wickr IO console will not run install.sh/start.sh at 0644 and
+        # gives no useful error when it declines.
+        chmod 755 bot/*.sh
+
+        # Tar the CONTENTS of bot/ at the archive root. node_modules and test are excluded
+        # because bot/install.sh runs npm install inside the container at startup;
+        # package-lock.json is excluded to match build-and-push-image.sh exactly.
+        tar -czf software.tar.gz --owner=0 --group=0 \
+          --exclude=node_modules --exclude=test --exclude=package-lock.json -C bot .
+
+        # ---------------------------------------------------------------------------
+        # Prove the archive is usable BEFORE spending time on a Docker build, and before
+        # pushing anything a deployment might pick up. A directory entry alone is not
+        # evidence: 'forms/' matches an empty directory, so require a file beneath it.
+        # ---------------------------------------------------------------------------
+        echo "=== Verifying archive contents ==="
+
+        # Read the listing once. Same pipefail/SIGPIPE reason as require_pattern above:
+        # "tar -tzf ... | grep -q" makes tar write into a pipe grep closes early, so the
+        # pipeline returns 141 and every check appears to fail. Reading once into a variable
+        # and matching with a here-string avoids that, and runs tar once instead of six times.
+        archive_entries="$(tar -tzf software.tar.gz)"
+
+        archive_must_contain() {
+          if ! grep -qE "$1" <<< "$archive_entries"; then
+            echo "ERROR: software.tar.gz is missing $2 -- refusing to build." >&2
+            echo "       Archive contains:" >&2
+            sed 's/^/         /' <<< "$archive_entries" >&2
+            exit 1
+          fi
+          echo "  ok: $2"
+        }
+        archive_must_contain '^\./bot\.js$'       'bot.js'
+        archive_must_contain '^\./install\.sh$'   'install.sh'
+        archive_must_contain '^\./start\.sh$'     'start.sh'
+        archive_must_contain '^\./package\.json$' 'package.json'
+        archive_must_contain '^\./forms/.+'       'at least one form definition'
+        archive_must_contain '^\./services/.+'    'the services/ directory'
+
+        echo "=== Forms included in the image ==="
+        grep -E '^\./forms/.+' <<< "$archive_entries" | sed 's/^/  /'
+
+        # The Dockerfile expects the entrypoint at pipeline/templates/start-bot.sh.
+        mkdir -p pipeline/templates
+        cp start-bot.sh pipeline/templates/start-bot.sh
+
+        # ---------------------------------------------------------------------------
+        # Build and push.
+        # ---------------------------------------------------------------------------
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "$ECR_DOMAIN"
+
+        build_args=(--build-arg "INTEGRATION_NAME=${INTEGRATION_NAME}")
+        if [ -n "${BASE_IMAGE:-}" ]; then
+          build_args+=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+        fi
+
+        # A failure on the FROM line means this build has no route to the base image.
+        # By default that is public.ecr.aws, which is not hosted in GovCloud. See
+        # docs/DEPLOY-CDK-CODEBUILD.md for the private-mirror workaround and its prerequisites.
+        docker build "${build_args[@]}" -t "$IMAGE_URI" -f Dockerfile .
+
+        docker push "$IMAGE_URI"
+
+        echo "BUILD_COMPLETE"
+        echo "IMAGE=${IMAGE_URI}"
+        echo "SOURCE_VERSION_ID=${SOURCE_VERSION_ID}"
+        echo
+        echo "Next, in config.yaml set:"
+        echo "  imageTag: \"${IMAGE_TAG}\""
+        echo "  integrationName: \"${INTEGRATION_NAME}\""
+        echo "then run 'npx cdk deploy'."
