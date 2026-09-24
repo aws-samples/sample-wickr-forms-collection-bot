@@ -11,30 +11,6 @@
         "WICKRIO_BOT_NAME": {
           "value": "",
           "encrypted": false
-        },
-        "AWS_REGION": {
-          "value": "us-east-1",
-          "encrypted": false
-        },
-        "BEDROCK_MODEL_ID": {
-          "value": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-          "encrypted": false
-        },
-        "REPORTS_BUCKET_NAME": {
-          "value": "",
-          "encrypted": false
-        },
-        "TRANSCRIPTION_S3_BUCKET": {
-          "value": "",
-          "encrypted": false
-        },
-        "TRANSCRIBE_MODE": {
-          "value": "batch",
-          "encrypted": false
-        },
-        "LOG_LEVEL": {
-          "value": "INFO",
-          "encrypted": false
         }
       }
     }

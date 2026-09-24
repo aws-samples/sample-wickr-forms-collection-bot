@@ -63,28 +63,34 @@ Examples:
 async function detect(text, formDefs, options) {
   const correlationId = options && options.correlationId;
   const timer = logger.startTimer();
-  const { InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+
+  // Guard: never invoke the model with empty content. Non-text events (system
+  // messages, empty payloads) produce blank text; the Converse API rejects
+  // blank message content with a ValidationException. Treat blank input as
+  // unclassifiable.
+  if (!text || text.trim() === '') {
+    logger.info('detector', 'classification_complete', {
+      correlationId, detectedFormType: 'UNKNOWN', durationMs: timer.elapsed()
+    });
+    return 'UNKNOWN';
+  }
+
+  const { ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 
   const systemPrompt = buildDetectionPrompt(formDefs);
   const modelId = modelConfig.getModelId();
 
-  logger.info('detector', 'classification_start', {
-    correlationId, modelId, inputLength: text.length,
-    inputPreview: text.substring(0, 100)
+  logger.debug('detector', 'classification_start', {
+    correlationId, modelId, inputLength: text.length
   });
 
-  const params = {
-    modelId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: modelConfig.buildRequestBody(systemPrompt, text, { maxTokens: 64 }),
-  };
+  // 512 tokens leaves headroom for reasoning models (e.g. gpt-oss-120b emits a
+  // reasoningContent block before the final answer). 64 was tuned for Claude.
+  const input = modelConfig.buildConverseInput(systemPrompt, text, { maxTokens: 512 });
 
   try {
-    const response = await getClient().send(new InvokeModelCommand(params));
-    // SDK v3 returns Uint8Array; parseResponseText expects Buffer for .toString('utf8')
-    const bodyBuf = Buffer.isBuffer(response.body) ? response.body : Buffer.from(response.body);
-    const contentText = modelConfig.parseResponseText(bodyBuf);
+    const response = await getClient().send(new ConverseCommand(input));
+    const contentText = modelConfig.parseConverseResponse(response);
 
     if (!contentText) {
       logger.error('detector', 'classification_error', {
@@ -95,42 +101,13 @@ async function detect(text, formDefs, options) {
 
     const result = contentText.trim();
 
-    // Log raw model response for debugging
-    logger.info('detector', 'raw_classification_response', {
-      correlationId, rawResponse: result.substring(0, 200), modelId
-    });
-
-    // Claude Sonnet 4+ may return the ID with extra text. Extract the first word
-    // and also search the full response for known form IDs.
-    const firstWord = result.split(/[\s,.:;]+/)[0].toUpperCase();
-
     // Verify the result is a known form ID
     const knownIds = formDefs.map(f => f.id);
-
-    // Try exact match on trimmed result first
     if (knownIds.includes(result)) {
       logger.info('detector', 'classification_complete', {
         correlationId, detectedFormType: result, durationMs: timer.elapsed()
       });
       return result;
-    }
-
-    // Try first word (handles "MEDEVAC - this is a medical..." responses)
-    if (knownIds.includes(firstWord)) {
-      logger.info('detector', 'classification_complete', {
-        correlationId, detectedFormType: firstWord, durationMs: timer.elapsed()
-      });
-      return firstWord;
-    }
-
-    // Search the full response for any known ID
-    for (const id of knownIds) {
-      if (result.toUpperCase().includes(id)) {
-        logger.info('detector', 'classification_complete', {
-          correlationId, detectedFormType: id, durationMs: timer.elapsed()
-        });
-        return id;
-      }
     }
 
     logger.info('detector', 'classification_complete', {

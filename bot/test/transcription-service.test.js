@@ -54,8 +54,8 @@ require.cache[S3_STUB_KEY] = {
       constructor() { return S3ClientStub; }
     },
     PutObjectCommand: PutObjectCommandStub,
-    GetObjectCommand: GetObjectCommandStub,
     DeleteObjectCommand: DeleteObjectCommandStub,
+    GetObjectCommand: GetObjectCommandStub,
   },
   parent: null,
   children: [],
@@ -88,6 +88,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// The service has no default bucket, so give the tests one before loading it.
+process.env.TRANSCRIPTION_S3_BUCKET = process.env.TRANSCRIPTION_S3_BUCKET || 'test-transcription-bucket';
 const transcriptionService = require('../services/transcription-service');
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -123,43 +125,19 @@ function makeJobResponse(status, transcriptUri = null, failureReason = null) {
 }
 
 /**
- * Installs an HTTPS mock for fetchTranscriptText to intercept the URI fetch.
- * Returns the transcript text that would be "fetched".
+ * Builds a mock S3 GetObject response containing a Transcribe output document.
+ * fetchTranscriptText retrieves the transcript via the S3 SDK (SigV4 auth is
+ * required in GovCloud), so the mock mirrors the SDK response shape.
  */
-function mockHttpsGet(transcriptText) {
-  const https = require('https');
-  const originalGet = https.get;
-
-  // Override https.get to return our fake transcript JSON
-  https.get = function (url, callback) {
-    const body = JSON.stringify({
-      results: {
-        transcripts: [{ transcript: transcriptText }],
-      },
-    });
-
-    // Simulate an IncomingMessage-like readable stream
-    const { Readable } = require('stream');
-    const stream = new Readable({ read() {} });
-    stream.statusCode = 200;
-    stream.headers = {};
-
-    if (callback) {
-      process.nextTick(() => {
-        callback(stream);
-        stream.emit('data', body);
-        stream.emit('end');
-      });
-    }
-
-    // Return an object with .on('error') to satisfy the call site
-    return {
-      on: (_event, _handler) => {},
-    };
-  };
-
-  return function restore() {
-    https.get = originalGet;
+function makeTranscriptGetResponse(transcriptText) {
+  return {
+    Body: {
+      transformToString: async () => JSON.stringify({
+        results: {
+          transcripts: [{ transcript: transcriptText }],
+        },
+      }),
+    },
   };
 }
 
@@ -203,7 +181,7 @@ describe('transcription-service', () => {
         deleteKeys.push(cmd.params.Key);
       }
       if (cmd.constructor_name === 'GetObjectCommand') {
-        return { Body: { transformToString: async () => JSON.stringify({ results: { transcripts: [{ transcript: transcriptText }] } }) } };
+        return makeTranscriptGetResponse(transcriptText);
       }
       return {};
     };
@@ -211,7 +189,8 @@ describe('transcription-service', () => {
     try {
       const result = await transcriptionService.transcribe(tmpFile, 'audio.mp3');
       assert.equal(result, transcriptText);
-      assert.ok(deleteKeys.length >= 1, 'S3 objects should be deleted after success');
+      // Both the uploaded audio object and the transcript output are cleaned up
+      assert.equal(deleteKeys.length, 2, 'audio and transcript objects should both be deleted');
     } finally {
       cleanupFile(tmpFile);
     }
@@ -240,7 +219,7 @@ describe('transcription-service', () => {
     s3SendStub = async (cmd) => {
       if (cmd.constructor_name === 'DeleteObjectCommand') deleteKeys.push(cmd.params.Key);
       if (cmd.constructor_name === 'GetObjectCommand') {
-        return { Body: { transformToString: async () => JSON.stringify({ results: { transcripts: [{ transcript: transcriptText }] } }) } };
+        return makeTranscriptGetResponse(transcriptText);
       }
       return {};
     };
@@ -249,7 +228,7 @@ describe('transcription-service', () => {
       const result = await transcriptionService.transcribe(tmpFile, 'audio.wav');
       assert.equal(result, transcriptText);
       assert.ok(pollCount >= 3, `Expected at least 3 polls, got ${pollCount}`);
-      assert.ok(deleteKeys.length >= 1, 'S3 objects should be deleted after success');
+      assert.equal(deleteKeys.length, 2, 'audio and transcript objects should be deleted after success');
     } finally {
       cleanupFile(tmpFile);
     }
@@ -283,7 +262,7 @@ describe('transcription-service', () => {
           return true;
         }
       );
-      assert.ok(deleteKeys.length >= 1, 'S3 object should still be deleted on job failure');
+      assert.equal(deleteKeys.length, 2, 'audio and transcript objects should still be deleted on job failure');
     } finally {
       cleanupFile(tmpFile);
     }
@@ -346,14 +325,14 @@ describe('transcription-service', () => {
         deletedKeys.push(cmd.params.Key);
       }
       if (cmd.constructor_name === 'GetObjectCommand') {
-        return { Body: { transformToString: async () => JSON.stringify({ results: { transcripts: [{ transcript: 'some transcript' }] } }) } };
+        return makeTranscriptGetResponse('some transcript');
       }
       return {};
     };
 
     try {
       await transcriptionService.transcribe(tmpFile, 'voice.mp3');
-      assert.ok(deletedKeys.length >= 1);
+      assert.equal(deletedKeys.length, 2, 'audio and transcript objects should both be deleted');
     } finally {
       cleanupFile(tmpFile);
     }
@@ -382,7 +361,7 @@ describe('transcription-service', () => {
 
     try {
       await assert.rejects(() => transcriptionService.transcribe(tmpFile, 'voice.mp3'));
-      assert.ok(deletedKeys.length >= 1, 'S3 object must be deleted even on failure');
+      assert.equal(deletedKeys.length, 2, 'audio and transcript objects must be deleted even on failure');
     } finally {
       cleanupFile(tmpFile);
     }

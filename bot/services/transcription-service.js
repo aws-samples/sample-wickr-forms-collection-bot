@@ -3,34 +3,48 @@
 
 'use strict';
 
-const { v4: uuidv4 } = require('crypto').randomUUID ? { v4: () => require('crypto').randomUUID() } : { v4: null };
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
 // ── Default region ─────────────────────────────────────────────────────────
 const AWS_REGION = process.env.AWS_REGION || 'us-gov-west-1';
-const S3_BUCKET = process.env.TRANSCRIPTION_S3_BUCKET || 'nine-line-transcription';
+// No fallback name: a guessable default could be registered by someone else, and audio would
+// then be uploaded to their bucket. Unset means transcription is disabled.
+const S3_BUCKET = process.env.TRANSCRIPTION_S3_BUCKET || '';
 
 // ── Polling configuration ──────────────────────────────────────────────────
 const POLL_INTERVAL_MS = 2000;
-const POLL_TIMEOUT_MS = 28000; // leave 2s buffer under the 30s acceptance criterion
 
-// ── Streaming configuration ────────────────────────────────────────────────
-const STREAM_CHUNK_SIZE = 25600;
-
-// Magic bytes → format info for Transcribe Streaming
-// Key: ASCII string of first 4 bytes of the file
-const MAGIC_BYTES_MAP = {
-  'RIFF': { encoding: 'pcm', needsHeaderStrip: true, defaultSampleRate: null },
-  'OggS': { encoding: 'ogg-opus', needsHeaderStrip: false, defaultSampleRate: 48000 },
-  'fLaC': { encoding: 'flac', needsHeaderStrip: false, defaultSampleRate: 16000 },
-};
+// Ceiling on how long to wait for a Transcribe batch job, not a target latency.
+// Polling returns as soon as the job completes, so a higher ceiling costs nothing in the
+// normal case -- a job that finishes in 8s still returns in 8s. It only bounds the worst
+// case, and hitting it means the user's voice memo is discarded and unrecoverable, since
+// both the audio and the transcript are deleted on the way out.
+//
+// Observed job durations for a ~290 KB memo: ~8s in a warmed-up account, ~28s for the
+// first job in a brand new account (cold capacity). The previous 28,000 ms ceiling lost
+// that race by under a second and dropped the recording.
+//
+// Override with TRANSCRIBE_POLL_TIMEOUT_MS to tune without rebuilding the image.
+const DEFAULT_POLL_TIMEOUT_MS = 60000;
+const POLL_TIMEOUT_MS = (() => {
+  const raw = process.env.TRANSCRIBE_POLL_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return DEFAULT_POLL_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn('transcribe', 'invalid_poll_timeout', {
+      configuredValue: raw,
+      defaultingTo: DEFAULT_POLL_TIMEOUT_MS,
+    });
+    return DEFAULT_POLL_TIMEOUT_MS;
+  }
+  return parsed;
+})();
 
 // ── Lazy-loaded clients (injectable for testing) ───────────────────────────
 let _s3Client = null;
 let _transcribeClient = null;
-let _streamingClient = null;
 
 function getS3Client() {
   if (_s3Client) return _s3Client;
@@ -44,13 +58,6 @@ function getTranscribeClient() {
   const { TranscribeClient } = require('@aws-sdk/client-transcribe');
   _transcribeClient = new TranscribeClient({ region: AWS_REGION });
   return _transcribeClient;
-}
-
-function getStreamingClient() {
-  if (_streamingClient) return _streamingClient;
-  const { TranscribeStreamingClient } = require('@aws-sdk/client-transcribe-streaming');
-  _streamingClient = new TranscribeStreamingClient({ region: AWS_REGION });
-  return _streamingClient;
 }
 
 /**
@@ -67,39 +74,6 @@ function _setS3Client(client) {
  */
 function _setTranscribeClient(client) {
   _transcribeClient = client;
-}
-
-/**
- * Inject mock streaming client (for testing).
- * @param {Object} client
- */
-function _setStreamingClient(client) {
-  _streamingClient = client;
-}
-
-/**
- * Reads TRANSCRIBE_MODE env var and returns 'streaming' or 'batch'.
- * Returns 'streaming' only if the value is exactly 'streaming'.
- * Logs a warning for unrecognized values.
- * @returns {'batch' | 'streaming'}
- */
-function resolveMode() {
-  const mode = process.env.TRANSCRIBE_MODE;
-  if (mode === 'streaming') return 'streaming';
-  if (mode === 'batch' || mode === undefined || mode === '') return 'batch';
-  logger.warn('transcribe', 'unrecognized_transcribe_mode', { configuredValue: mode, defaultingTo: 'batch' });
-  return 'batch';
-}
-
-/**
- * Detects audio format by reading the first 4 bytes (magic bytes) of a Buffer.
- * @param {Buffer} buffer
- * @returns {object|null} Format info from MAGIC_BYTES_MAP, or null if unrecognized
- */
-function detectFormat(buffer) {
-  if (!buffer || buffer.length < 4) return null;
-  const magic = buffer.slice(0, 4).toString('ascii');
-  return MAGIC_BYTES_MAP[magic] || null;
 }
 
 /**
@@ -220,6 +194,9 @@ async function batchPipeline(filePath, filename, options) {
   const { StartTranscriptionJobCommand } = require('@aws-sdk/client-transcribe');
 
   const bucket = S3_BUCKET;
+  if (!bucket) {
+    throw new Error('TRANSCRIPTION_S3_BUCKET is not set; voice memo transcription is disabled');
+  }
   const s3Key = generateS3Key(filename);
   const jobName = `nine-line-${require('crypto').randomUUID()}`;
   const transcriptKey = `transcripts/${jobName}.json`;
@@ -281,164 +258,11 @@ async function batchPipeline(filePath, filename, options) {
 }
 
 /**
- * Streaming transcription pipeline:
- *   1. Read file into Buffer
- *   2. Detect format via magic bytes
- *   3. Parse WAV header or use defaults for OGG/FLAC
- *   4. Stream audio chunks to Transcribe Streaming
- *   5. Collect and return final transcript
+ * Transcription entry point. Uses the Transcribe batch job API.
  *
- * @param {string} filePath - Local path to the audio file
- * @param {string} filename - Original filename (passed through to batch fallback)
- * @returns {Promise<string>} The transcribed text
- */
-async function streamPipeline(filePath, filename, options) {
-  const correlationId = options && options.correlationId;
-  const timer = logger.startTimer();
-  try {
-    // ── Step 1: Read file ──────────────────────────────────────────────────
-    const buffer = fs.readFileSync(filePath);
-
-    // ── Step 2: Check minimum size ─────────────────────────────────────────
-    if (buffer.length < 4) {
-      logger.warn('transcribe', 'streaming_fallback_to_batch', { correlationId, reason: `file too small (${buffer.length} bytes)` });
-      return batchPipeline(filePath, filename, options);
-    }
-
-    // ── Step 3: Detect format ──────────────────────────────────────────────
-    const formatInfo = detectFormat(buffer);
-    if (!formatInfo) {
-      const hex = buffer.slice(0, 4).toString('hex');
-      logger.warn('transcribe', 'streaming_fallback_to_batch', { correlationId, reason: `unrecognized magic bytes (0x${hex})` });
-      return batchPipeline(filePath, filename, options);
-    }
-
-    const magic = buffer.slice(0, 4).toString('ascii');
-    logger.info('transcribe', 'transcription_start', { correlationId, mode: 'streaming', fileSize: buffer.length, detectedMagic: magic, encoding: formatInfo.encoding });
-
-    let audioData;
-    let sampleRate;
-    let mediaEncoding;
-    let numberOfChannels;
-
-    // ── Step 4: Parse format-specific data ─────────────────────────────────
-    if (formatInfo.needsHeaderStrip) {
-      // WAV (RIFF) — walk chunks to find the 'data' subchunk
-      if (buffer.length < 44) {
-        throw new Error('WAV file too small to contain valid header');
-      }
-
-      // Validate WAV format: Transcribe Streaming requires PCM 16-bit signed LE
-      const audioFormat = buffer.readUInt16LE(20);   // 1 = PCM, 3 = IEEE float, others = compressed
-      const bitsPerSample = buffer.readUInt16LE(34);
-      sampleRate = buffer.readUInt32LE(24);
-      numberOfChannels = buffer.readUInt16LE(22);
-
-      if (audioFormat !== 1 || bitsPerSample !== 16) {
-        logger.warn('transcribe', 'streaming_fallback_to_batch', {
-          correlationId,
-          reason: `WAV not PCM-16: audioFormat=${audioFormat}, bitsPerSample=${bitsPerSample}`,
-        });
-        return batchPipeline(filePath, filename, options);
-      }
-
-      mediaEncoding = 'pcm';
-
-      // Walk RIFF subchunks starting after the RIFF header (12 bytes)
-      let dataOffset = 12;
-      while (dataOffset + 8 <= buffer.length) {
-        const chunkId = buffer.slice(dataOffset, dataOffset + 4).toString('ascii');
-        const chunkSize = buffer.readUInt32LE(dataOffset + 4);
-        if (chunkId === 'data') {
-          audioData = buffer.slice(dataOffset + 8, dataOffset + 8 + chunkSize);
-          break;
-        }
-        dataOffset += 8 + chunkSize;
-        // RIFF chunks are word-aligned
-        if (chunkSize % 2 !== 0) dataOffset += 1;
-      }
-      if (!audioData) {
-        logger.warn('transcribe', 'streaming_fallback_to_batch', {
-          correlationId, reason: 'WAV data chunk not found',
-        });
-        return batchPipeline(filePath, filename, options);
-      }
-    } else {
-      // OGG or FLAC
-      audioData = buffer;
-      sampleRate = formatInfo.defaultSampleRate;
-      mediaEncoding = formatInfo.encoding;
-    }
-
-    // ── Step 5: Build command params ───────────────────────────────────────
-    logger.debug('transcribe', 'format_detected', { correlationId, encoding: mediaEncoding, sampleRate });
-    const { StartStreamTranscriptionCommand } = require('@aws-sdk/client-transcribe-streaming');
-
-    const commandParams = {
-      LanguageCode: 'en-US',
-      MediaEncoding: mediaEncoding,
-      MediaSampleRateHertz: sampleRate,
-      AudioStream: (async function* () {
-        if (audioData.length === 0) return;
-        for (let offset = 0; offset < audioData.length; offset += STREAM_CHUNK_SIZE) {
-          const chunk = audioData.slice(offset, offset + STREAM_CHUNK_SIZE);
-          yield { AudioEvent: { AudioChunk: chunk } };
-        }
-      })(),
-    };
-
-    if (numberOfChannels !== undefined && numberOfChannels >= 2) {
-      commandParams.NumberOfChannels = numberOfChannels;
-    }
-
-    // ── Step 6: Send to Transcribe Streaming ───────────────────────────────
-    logger.debug('transcribe', 'streaming_session_start', { correlationId, encoding: mediaEncoding, sampleRate, audioBytes: audioData.length });
-    const response = await getStreamingClient().send(
-      new StartStreamTranscriptionCommand(commandParams)
-    );
-
-    // ── Step 7: Collect results ────────────────────────────────────────────
-    const transcripts = [];
-    for await (const event of response.TranscriptResultStream) {
-      const results = event.TranscriptEvent &&
-        event.TranscriptEvent.Transcript &&
-        event.TranscriptEvent.Transcript.Results;
-      if (!results) continue;
-      for (const result of results) {
-        if (result.IsPartial === false &&
-            result.Alternatives &&
-            result.Alternatives[0] &&
-            result.Alternatives[0].Transcript) {
-          transcripts.push(result.Alternatives[0].Transcript);
-        }
-      }
-    }
-
-    // ── Step 8: Validate and return ────────────────────────────────────────
-    if (transcripts.length === 0) {
-      logger.warn('transcribe', 'streaming_empty_fallback_to_batch', {
-        correlationId,
-        encoding: mediaEncoding,
-        sampleRate,
-        audioBytes: audioData.length,
-        durationMs: timer.elapsed(),
-      });
-      return batchPipeline(filePath, filename, options);
-    }
-
-    const text = transcripts.join(' ');
-    logger.info('transcribe', 'transcription_complete', { correlationId, mode: 'streaming', durationMs: timer.elapsed(), transcriptLength: text.length });
-    return text;
-
-  } catch (err) {
-    logger.error('transcribe', 'transcription_error', { correlationId, mode: 'streaming', error: err, durationMs: timer.elapsed() });
-    throw err;
-  }
-}
-
-/**
- * Transcription entry point — delegates to streaming or batch pipeline
- * based on the TRANSCRIBE_MODE environment variable.
+ * Streaming transcription was removed: Amazon Transcribe Streaming does not accept the
+ * audio format Wickr produces for voice memos, so the streaming path could never succeed
+ * in practice. Batch is the only supported mode.
  *
  * @param {string} filePath - Local path to the audio file
  * @param {string} filename - Original filename (used for key generation and media format)
@@ -446,10 +270,6 @@ async function streamPipeline(filePath, filename, options) {
  * @throws {Error} on transcription failure
  */
 async function transcribe(filePath, filename, options) {
-  const mode = resolveMode();
-  if (mode === 'streaming') {
-    return streamPipeline(filePath, filename, options);
-  }
   return batchPipeline(filePath, filename, options);
 }
 
@@ -458,7 +278,4 @@ module.exports = {
   generateS3Key,
   _setS3Client,
   _setTranscribeClient,
-  _setStreamingClient,
-  resolveMode,
-  detectFormat,
 };

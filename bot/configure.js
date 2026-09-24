@@ -1,10 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
+//
+// Interactive configuration for the EC2 / Wickr IO console deployment path
+// (docs/DEPLOY-EC2.md). The console runs configure.sh, which runs this file.
+//
+// It prompts for each token declared in configTokens.json and writes the answers into
+// processes.json, which is what WickrIOSvr reads when it starts the bot. The CDK/ECS paths
+// do not use this file at all -- there the same values arrive as container environment
+// variables set by the stack.
 
 const WickrIOBotAPI = require('wickrio-bot-api');
 
-const { exec, execSync, execFileSync } = require('child_process');
-
+// Loads .env.configure, which configure.sh writes when you pass it a file of pre-seeded
+// answers. This is NOT redundant with configure.sh sourcing that file: `.` sets shell
+// variables, and a plain `FOO=bar` without `export` is never inherited by this process.
 require('dotenv').config({
   path: '.env.configure',
 });

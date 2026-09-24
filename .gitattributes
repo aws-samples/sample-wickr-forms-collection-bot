@@ -1,0 +1,30 @@
+# Normalize line endings in the repository so a file's history does not depend on the
+# platform that committed it.
+* text=auto
+
+# Files below are EXECUTED ON LINUX inside the Wickr IO container and must be LF on every
+# platform, including a Windows checkout.
+#
+# Git for Windows ships core.autocrlf=true by default. Without these rules, cloning on
+# Windows rewrites these scripts with CRLF, and then:
+#
+#   - start-bot.sh is the container ENTRYPOINT. A CRLF shebang makes the kernel look for
+#     an interpreter literally named "/bin/bash\r", so the task dies immediately with
+#     "bad interpreter: /bin/bash^M: no such file or directory".
+#   - bot/install.sh and bot/start.sh are invoked by WickrIOSvr, which fails the same way
+#     but without surfacing a useful error -- the container runs and the bot never starts.
+#
+# The build's "chmod 755 bot/*.sh" fixes the execute bit only; it cannot repair line
+# endings. These rules are the only thing that prevents that failure mode for anyone who
+# clones this repository on Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf
+buildspec.yml text eol=lf
+
+# Treat known binary types as binary so Git never attempts EOL conversion on them.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+*.pem binary

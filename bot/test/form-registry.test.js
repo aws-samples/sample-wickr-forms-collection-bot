@@ -3,45 +3,7 @@
 
 'use strict';
 
-// ── Bootstrap: stub AWS SDK modules before any service loads ──────────────────
-const Module = require('module');
-const path   = require('path');
-
-const _originalResolve = Module._resolveFilename;
-
-const AWS_BEDROCK_KEY    = '__aws_bedrock_runtime_stub__';
-const AWS_S3_KEY         = '__aws_s3_stub__';
-const AWS_TRANSCRIBE_KEY = '__aws_transcribe_stub__';
-
-Module._resolveFilename = function (request, parent, isMain, options) {
-  if (request === '@aws-sdk/client-bedrock-runtime') return AWS_BEDROCK_KEY;
-  if (request === '@aws-sdk/client-s3')              return AWS_S3_KEY;
-  if (request === '@aws-sdk/client-transcribe')      return AWS_TRANSCRIBE_KEY;
-  return _originalResolve.call(this, request, parent, isMain, options);
-};
-
-function makeAWSStub(name, exports) {
-  return {
-    id: name, filename: name, loaded: true,
-    exports,
-    parent: null, children: [], paths: [],
-  };
-}
-
-require.cache[AWS_BEDROCK_KEY] = makeAWSStub(AWS_BEDROCK_KEY, {
-  BedrockRuntimeClient: class { constructor() {} async send() { throw new Error('stub'); } },
-  InvokeModelCommand:   class { constructor(p) { this.params = p; } },
-});
-require.cache[AWS_S3_KEY] = makeAWSStub(AWS_S3_KEY, {
-  S3Client:            class { constructor() {} async send() {} },
-  PutObjectCommand:    class { constructor(p) { this.params = p; } },
-  DeleteObjectCommand: class { constructor(p) { this.params = p; } },
-});
-require.cache[AWS_TRANSCRIBE_KEY] = makeAWSStub(AWS_TRANSCRIBE_KEY, {
-  TranscribeClient:                class { constructor() {} async send() {} },
-  StartTranscriptionJobCommand:    class { constructor(p) { this.params = p; } },
-  GetTranscriptionJobCommand:      class { constructor(p) { this.params = p; } },
-});
+const path = require('path');
 
 // ── Load form-registry ────────────────────────────────────────────────────────
 const registry = require('../services/form-registry');

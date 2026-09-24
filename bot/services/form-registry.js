@@ -16,10 +16,17 @@ const formsByCommand = new Map();
 function loadForms(formsDir) {
   formsById.clear();
   formsByCommand.clear();
-  const dir = formsDir || path.join(__dirname, '..', 'forms');
+  const dir = fs.realpathSync(formsDir || path.join(__dirname, '..', 'forms'));
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.js'));
   for (const file of files) {
-    const def = require(path.join(dir, file));
+    const modulePath = fs.realpathSync(path.join(dir, file));
+    if (path.dirname(modulePath) !== dir) {
+      logger.error('registry', 'form_definition_outside_directory', { definitionFile: file });
+      continue;
+    }
+    // nosemgrep: javascript.lang.security.audit.detect-non-literal-require
+    // file comes from readdirSync(dir), must end in .js, and resolves directly under dir.
+    const def = require(modulePath);
     if (!def.id || !def.fields) {
       logger.error('registry', 'invalid_form_definition', { definitionFile: file });
       continue;
@@ -95,13 +102,6 @@ function isValidReport(formDef, report) {
   return true;
 }
 
-/**
- * Returns an array of required fields that are missing (value is NOT_PROVIDED or null).
- * Fields with optional: true are skipped.
- * @param {object} formDef
- * @param {object} report
- * @returns {Array<{key: string, label: string}>}
- */
 function getMissingRequiredFields(formDef, report) {
   if (!report || typeof report !== 'object') return [];
   const missing = [];
